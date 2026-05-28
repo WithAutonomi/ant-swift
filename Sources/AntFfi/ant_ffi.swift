@@ -633,6 +633,34 @@ public static func connect(peers: [String])async throws  -> Client  {
 }
     
     /**
+     * Connect to a locally running devnet using the manifest JSON file the
+     * devnet wrote on startup (`LocalDevnet::write_manifest`).
+     *
+     * Reads bootstrap peers, EVM RPC URL + contract addresses, and the
+     * funded wallet private key from the manifest, then constructs a Client
+     * with the wallet attached. Suitable for **development and testing
+     * only** — production code should provide bootstrap peers and wallet
+     * material explicitly via [`Self::connect_with_wallet`].
+     *
+     * Fails if the manifest doesn't exist, is malformed, or has no `evm`
+     * section (a devnet started without payment enforcement).
+     */
+public static func connectFromDevnetManifest(path: String)async throws  -> Client  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_ant_ffi_fn_constructor_client_connect_from_devnet_manifest(FfiConverterString.lower(path)
+                )
+            },
+            pollFunc: ffi_ant_ffi_rust_future_poll_pointer,
+            completeFunc: ffi_ant_ffi_rust_future_complete_pointer,
+            freeFunc: ffi_ant_ffi_rust_future_free_pointer,
+            liftFunc: FfiConverterTypeClient_lift,
+            errorHandler: FfiConverterTypeClientError_lift
+        )
+}
+    
+    /**
      * Connect to a local test network.
      */
 public static func connectLocal()async throws  -> Client  {
@@ -1824,6 +1852,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_ant_ffi_checksum_constructor_client_connect() != 27345) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ant_ffi_checksum_constructor_client_connect_from_devnet_manifest() != 55097) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_ant_ffi_checksum_constructor_client_connect_local() != 40455) {
