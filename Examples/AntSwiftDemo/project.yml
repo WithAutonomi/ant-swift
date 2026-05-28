@@ -1,0 +1,42 @@
+name: AntSwiftDemo
+options:
+  bundleIdPrefix: com.autonomi.examples
+  deploymentTarget:
+    iOS: "16.0"
+    macOS: "13.0"
+  createIntermediateGroups: true
+
+# Consume the ant-swift package from the consumer repo it lives in
+# (this examples folder is inside that repo). Use a relative path dep
+# so the demo always tracks the working tree's Package.swift, even on
+# branches before v0.0.2 is tagged. To pin against a published version,
+# replace with `url:` + `from:`.
+packages:
+  AntSwift:
+    path: ../..
+
+targets:
+  AntSwiftDemo:
+    type: application
+    supportedDestinations: [iOS, macOS]
+    sources: [Sources/AntSwiftDemo]
+    dependencies:
+      - package: AntSwift
+        product: AntFfi
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        CURRENT_PROJECT_VERSION: "1"
+        MARKETING_VERSION: "0.1"
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
+        INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone: "UIInterfaceOrientationPortrait"
+        # Test/dev only — the demo loads files from /Users/<user>/Library/...
+        # and needs outbound networking. App Sandbox would block both.
+        ENABLE_APP_SANDBOX: NO
+        ENABLE_HARDENED_RUNTIME: NO
+        # No team / signing required for local dev runs.
+        CODE_SIGN_IDENTITY: "-"
+        CODE_SIGNING_REQUIRED: NO
+        CODE_SIGN_STYLE: Manual
+        DEVELOPMENT_TEAM: ""
