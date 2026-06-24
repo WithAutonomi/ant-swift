@@ -9,6 +9,13 @@ struct ContentView: View {
     @State private var status: String = "Idle. Start a local devnet, then tap Upload."
     @State private var busy: Bool = false
 
+    #if os(iOS)
+    @StateObject private var wallet = WalletConnectManager()
+    // Spike: paste a projectId from https://dashboard.reown.com. (The desktop
+    // app uses its own WalletConnect Cloud project; reuse or create one.)
+    private let reownProjectId = "REPLACE_WITH_REOWN_PROJECT_ID"
+    #endif
+
     /// Path the devnet writes its manifest to on the host. The iOS Simulator
     /// shares the macOS filesystem so this absolute path is reachable from
     /// inside the sim too — no env-var wiring required.
@@ -51,13 +58,62 @@ struct ContentView: View {
                 }.padding(6)
             }
 
+            #if os(iOS)
+            walletSection
+            #endif
+
             Text(status).font(.caption).foregroundColor(.secondary)
             if busy { ProgressView().controlSize(.small) }
             Spacer()
         }
         .padding(16)
         .frame(minWidth: 420, minHeight: 380)
+        #if os(iOS)
+        .onAppear { wallet.configure(projectId: reownProjectId) }
+        #endif
     }
+
+    #if os(iOS)
+    /// WalletConnect spike UI: connect an external wallet and have it sign a
+    /// real Autonomi payment-vault `approve` (amount 0 → gas only, no balance
+    /// needed). Proves the external-signer path before the FFI prepare/finalize
+    /// surface (V2-391) lands to make it a full paid upload.
+    @ViewBuilder private var walletSection: some View {
+        GroupBox("Wallet (WalletConnect spike)") {
+            VStack(alignment: .leading, spacing: 8) {
+                if let address = wallet.address {
+                    Text("Connected: \(address)")
+                        .font(.system(.caption, design: .monospaced))
+                        .textSelection(.enabled)
+                    Text("Chain: \(wallet.chainCaip2 ?? "?")").font(.caption2)
+                    Button("Send test approve tx (Arbitrum One)") {
+                        Task { await sendApprove() }
+                    }.disabled(busy)
+                } else {
+                    Button("Connect Wallet") { wallet.connect() }
+                }
+                if let hash = wallet.lastTxHash {
+                    Text("tx: \(hash)")
+                        .font(.system(.caption, design: .monospaced))
+                        .textSelection(.enabled)
+                }
+                Text(wallet.status).font(.caption2).foregroundColor(.secondary)
+            }.padding(6)
+        }
+    }
+
+    private func sendApprove() async {
+        busy = true
+        defer { busy = false }
+        do {
+            // amount "0": real signed tx, only gas — proves the signing path
+            // without needing a token balance.
+            _ = try await wallet.sendApprove(chain: .arbitrumOne, amount: "0")
+        } catch {
+            status = "Approve failed: \(error.localizedDescription)"
+        }
+    }
+    #endif
 
     // MARK: - Actions
 

@@ -14,6 +14,14 @@ options:
 packages:
   AntSwift:
     path: ../..
+  # WalletConnect spike (iOS only). Reown AppKit is the successor to
+  # Web3Modal — the same stack the desktop app uses (Reown AppKit + wagmi).
+  # Product/module is `ReownAppKit`. Kept iOS-only because the connect modal
+  # and a transitive dep (CoinbaseWalletSDK) are iOS-oriented; all call sites
+  # are guarded with #if os(iOS).
+  ReownAppKit:
+    url: https://github.com/reown-com/reown-swift
+    majorVersion: 1.0.0
 
 targets:
   AntSwiftDemo:
@@ -23,6 +31,11 @@ targets:
     dependencies:
       - package: AntSwift
         product: AntFfi
+      # iOS-only: keep this off the macOS build (module name clash + the
+      # package targets iOS). All call sites are guarded with #if os(iOS).
+      - package: ReownAppKit
+        product: ReownAppKit
+        platformFilter: iOS
     settings:
       base:
         GENERATE_INFOPLIST_FILE: YES
