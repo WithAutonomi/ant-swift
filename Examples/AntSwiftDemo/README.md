@@ -100,15 +100,25 @@ for that next step.
    addresses in `AutonomiContracts.swift` (from your devnet manifest) and
    target `.arbitrumSepolia`.
 
-### Known unknowns (verify in Xcode)
+### Build status
 
-- Not yet compiled. The Reown request/response bridging in
-  `WalletConnectManager.swift` (`Request`, `Response`, `RPCResult`, the
-  `sessionResponsePublisher`) is written against the docs and may need
-  type/name tweaks against the resolved SDK version.
-- macOS: the spike is `#if os(iOS)` (the product/module is `ReownAppKit`; the
-  connect modal + a transitive Coinbase dep are iOS-oriented). The
-  `platformFilter: iOS` in `project.yml` keeps it off the macOS build.
+- ✅ **Compiles** for the iPhone simulator (verified: `BUILD SUCCEEDED`). The
+  Reown API in `WalletConnectManager.swift` was corrected against the resolved
+  SDK source — `sessionsPublisher` / `sessionResponsePublisher`,
+  `AppKit.configure(projectId:metadata:crypto:authRequestParams:)`,
+  `AppKit.instance.request(.eth_sendTransaction(...))`, `getAddress()` /
+  `getSelectedChain()`. `SpikeCryptoProvider` is a stub (SIWE-only, unused here).
+- ⚠️ **Requires the V2-532 fix to build.** AntFfi's published *static*
+  xcframework collides with Reown's `yttrium` xcframework on
+  `include/module.modulemap`. The build above used a **dynamic-framework**
+  AntFfi xcframework (the V2-532 fix). Until ant-sdk ships that, the spike
+  won't link against the v0.0.2 release. See Linear V2-532.
+- **Not yet run on a device.** The simulator can't run a wallet app, so the
+  actual connect→sign→tx-hash round-trip still needs a real iPhone + wallet
+  (or QR-pairing a desktop wallet).
+- macOS: the spike is `#if os(iOS)` (module `ReownAppKit`; the connect modal +
+  a transitive Coinbase dep are iOS-oriented). `platformFilter: iOS` in
+  `project.yml` keeps it off the macOS build.
 
 ## Caveats
 
