@@ -36,14 +36,34 @@ targets:
       - package: ReownAppKit
         product: ReownAppKit
         platformFilter: iOS
+      # Needed to call Networking.configure(...) before AppKit.configure (the
+      # SDK requires it). Re-exports WalletConnectRelay → WebSocketFactory.
+      - package: ReownAppKit
+        product: WalletConnectNetworking
+        platformFilter: iOS
+    # Generated Info.plist — needed so we can register the `autonomi://` URL
+    # scheme (CFBundleURLTypes), the mobile analogue of the Android app's
+    # intent filter, for deep links into the Downloads tab.
+    info:
+      path: AntSwiftDemo-Info.plist
+      properties:
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations~iphone:
+          - UIInterfaceOrientationPortrait
+        # Expose the app's Documents in the Files app so the upload picker has
+        # something to select on a bare Simulator (we seed a sample file there).
+        UIFileSharingEnabled: true
+        LSSupportsOpeningDocumentsInPlace: true
+        CFBundleURLTypes:
+          - CFBundleURLName: com.autonomi.examples.AntSwiftDemo
+            CFBundleURLSchemes:
+              - autonomi
     settings:
       base:
-        GENERATE_INFOPLIST_FILE: YES
+        # WalletConnect keychain/app-group entitlements (iOS). Harmless on macOS.
+        CODE_SIGN_ENTITLEMENTS: AntSwiftDemo.entitlements
         CURRENT_PROJECT_VERSION: "1"
         MARKETING_VERSION: "0.1"
-        INFOPLIST_KEY_UILaunchScreen_Generation: YES
-        INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
-        INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone: "UIInterfaceOrientationPortrait"
         # Test/dev only — the demo loads files from /Users/<user>/Library/...
         # and needs outbound networking. App Sandbox would block both.
         ENABLE_APP_SANDBOX: NO

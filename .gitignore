@@ -3,3 +3,6 @@
 DerivedData/
 Package.resolved
 .DS_Store
+
+# FFI binary — shipped via ant-sdk release, not tracked
+AntFfi.xcframework/

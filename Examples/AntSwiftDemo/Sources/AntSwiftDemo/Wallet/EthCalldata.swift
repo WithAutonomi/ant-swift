@@ -7,13 +7,17 @@ import Foundation
 /// Function selectors are hard-coded (precomputed keccak256 of the signature)
 /// so we don't need a keccak implementation in the demo:
 ///   approve(address,uint256)                                  -> 0x095ea7b3
-///   payForQuotes((address,uint256,bytes32)[])                 -> 0x77a23fd7
+///   payForQuotes((address,uint256,bytes32)[])                 -> 0xb6c2141b
+///
+/// (Verified with `cast sig`. An earlier value of 0x77a23fd7 was wrong — it
+/// matches no function on the deployed PaymentVault, so calls fell through to
+/// the fallback and reverted with empty data.)
 ///
 /// All integers are encoded big-endian, left-padded to 32 bytes.
 enum EthCalldata {
     // MARK: Selectors
     static let approveSelector = "095ea7b3"
-    static let payForQuotesSelector = "77a23fd7"
+    static let payForQuotesSelector = "b6c2141b"
 
     /// ERC-20 `approve(spender, amount)`.
     /// `amount` is a base-10 string (atto-token amounts exceed UInt64).
