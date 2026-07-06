@@ -1,0 +1,149 @@
+name: Publish FFI
+
+# Builds the AntFfi xcframework from ant-sdk's Rust FFI crate, updates
+# Package.swift (binaryTarget url + checksum) and the generated Swift glue on
+# main, then publishes the xcframework as an ant-swift GitHub release whose tag
+# points at that bump commit.
+#
+# WHY this lives in ant-swift (the consumer), not ant-sdk (the source):
+#   - The artifact's namespace is here — the binaryTarget url resolves to an
+#     *ant-swift* release, so the release must be created in this repo.
+#   - The toolchain is macOS/Swift-only (xcodebuild, `swift package
+#     compute-checksum`); it belongs with the Swift package, not the mostly-Rust
+#     ant-sdk repo.
+#   - Decoupled cadence: pick which ant-sdk ref to build from, on demand.
+# The BUILD LOGIC stays in ant-sdk (ffi/scripts/build-swift.sh) — this workflow
+# only checks that out and runs it, so there's a single source of truth.
+#
+# ORDERING (important): the Package.swift bump is committed to main FIRST, then
+# the release/tag is created AT that commit. SwiftPM resolves a version tag and
+# reads Package.swift *at that tag*, so tagging before the bump would leave the
+# tag pointing at the previous release's url+checksum. Manually verified this is
+# the failure mode; do not reorder.
+#
+# Requires an unprotected main (it pushes the bump directly). If main becomes
+# protected, split into: (1) a PR that bumps Package.swift+glue, then (2) create
+# the release/tag only after that PR merges — a single workflow run can't tag a
+# commit that doesn't exist on main yet.
+#
+# Manually triggered from the Actions tab (or `gh workflow run`).
+
+on:
+  workflow_dispatch:
+    inputs:
+      ant_sdk_ref:
+        description: "ant-sdk git ref (branch, tag, or SHA) to build the FFI from"
+        required: true
+        default: "main"
+      release_tag:
+        description: "ant-swift release tag to publish, e.g. v0.0.4"
+        required: true
+
+permissions:
+  contents: write # create the release + push the Package.swift bump
+
+jobs:
+  publish:
+    name: Build + publish AntFfi.xcframework
+    runs-on: macos-latest # xcodebuild + swift live here
+    steps:
+      - name: Check out ant-swift (self)
+        uses: actions/checkout@v4
+
+      - name: Check out ant-sdk @ ${{ inputs.ant_sdk_ref }}
+        uses: actions/checkout@v4
+        with:
+          repository: WithAutonomi/ant-sdk
+          ref: ${{ inputs.ant_sdk_ref }}
+          path: ant-sdk
+
+      - name: Install Rust + Apple targets
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          # Must match the slices build-swift.sh assembles.
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim,aarch64-apple-darwin
+
+      - name: Install protoc
+        # ant-protocol (transitive via ant-core) compiles .proto at build time.
+        uses: arduino/setup-protoc@v3
+        with:
+          version: "25.x"
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Cache cargo + target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ant-sdk/ffi/rust/target
+          key: ffi-${{ runner.os }}-${{ hashFiles('ant-sdk/ffi/rust/Cargo.lock') }}
+          restore-keys: ffi-${{ runner.os }}-
+
+      - name: Build xcframework + bindings
+        # Outputs into ant-sdk/ffi/build/: AntFfi.xcframework.zip,
+        # AntFfi.xcframework.zip.sha256, ant_ffi.swift
+        run: ant-sdk/ffi/scripts/build-swift.sh
+
+      - name: Collect build outputs
+        id: ffi
+        run: |
+          set -euo pipefail
+          BUILD="ant-sdk/ffi/build"
+          test -f "$BUILD/AntFfi.xcframework.zip"
+          checksum="$(cat "$BUILD/AntFfi.xcframework.zip.sha256")"
+          url="https://github.com/${{ github.repository }}/releases/download/${{ inputs.release_tag }}/AntFfi.xcframework.zip"
+          echo "zip=$BUILD/AntFfi.xcframework.zip"   >> "$GITHUB_OUTPUT"
+          echo "glue=$BUILD/ant_ffi.swift"           >> "$GITHUB_OUTPUT"
+          echo "checksum=$checksum"                  >> "$GITHUB_OUTPUT"
+          echo "url=$url"                            >> "$GITHUB_OUTPUT"
+          echo "Built $(du -h "$BUILD/AntFfi.xcframework.zip" | cut -f1), sha256=$checksum"
+
+      - name: Bump Package.swift + glue, commit to main
+        # Commit FIRST so the release tag (next step) points at a self-consistent
+        # commit whose Package.swift references this very release.
+        id: bump
+        env:
+          URL: ${{ steps.ffi.outputs.url }}
+          CHECKSUM: ${{ steps.ffi.outputs.checksum }}
+          TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          perl -pi -e '
+            s{(url: ")[^"]*(")}{$1$ENV{URL}$2};
+            s{(checksum: ")[^"]*(")}{$1$ENV{CHECKSUM}$2};
+          ' Package.swift
+          cp "${{ steps.ffi.outputs.glue }}" Sources/AntFfi/ant_ffi.swift
+          echo "--- Package.swift binaryTarget now ---"
+          grep -E 'url:|checksum:' Package.swift
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Package.swift Sources/AntFfi/ant_ffi.swift
+          git commit -m "release: AntFfi ${TAG} (from ant-sdk @ ${{ inputs.ant_sdk_ref }})"
+          git push origin HEAD:main
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Publish release at the bump commit
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh release create "${{ inputs.release_tag }}" \
+            "${{ steps.ffi.outputs.zip }}" \
+            --repo "${{ github.repository }}" \
+            --target "${{ steps.bump.outputs.sha }}" \
+            --title "${{ inputs.release_tag }}" \
+            --notes "AntFfi.xcframework built from ant-sdk @ \`${{ inputs.ant_sdk_ref }}\`. sha256: \`${{ steps.ffi.outputs.checksum }}\`"
+
+      - name: Verify published asset matches the checksum
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          tmp="$(mktemp -d)"
+          gh release download "${{ inputs.release_tag }}" --repo "${{ github.repository }}" \
+            --pattern 'AntFfi.xcframework.zip' --dir "$tmp"
+          got="$(shasum -a 256 "$tmp/AntFfi.xcframework.zip" | awk '{print $1}')"
+          [ "$got" = "${{ steps.ffi.outputs.checksum }}" ] \
+            && echo "✅ asset matches binaryTarget checksum" \
+            || { echo "❌ checksum mismatch: $got != ${{ steps.ffi.outputs.checksum }}"; exit 1; }
