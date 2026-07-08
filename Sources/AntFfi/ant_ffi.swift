@@ -647,6 +647,26 @@ public protocol ClientProtocol: AnyObject, Sendable {
     func finalizeUploadWithProgress(uploadId: String, txHashes: [String: String], listener: ProgressListener) async throws  -> ExternalUploadResult
     
     /**
+     * Phase 1.5 (external signer): build the ordered transactions the external
+     * wallet must sign to pay for a prepared upload — an ERC-20 `approve`
+     * followed by the vault payment call(s). This replaces the hand-rolled ABI
+     * encoding + hardcoded selectors that consumers used to carry.
+     *
+     * Sign each [`TxRequest`] in the returned order, waiting for each receipt,
+     * then finalize:
+     * - **wave-batch**: for each `"pay"` tx, map every entry in its
+     * `quote_hashes` to that tx's hash, then call [`Self::finalize_upload`];
+     * - **merkle**: read the winner pool hash from the `"pay"` receipt's
+     * `MerklePaymentMade` event and call [`Self::finalize_upload_merkle`].
+     *
+     * Returns an empty list when everything was already stored (nothing to
+     * pay). Only valid on a client built with `connect_for_external_signer` /
+     * `connect_from_devnet_manifest_external_signer`; other clients return
+     * [`ClientError::WalletNotConfigured`].
+     */
+    func paymentTransactions(uploadId: String) async throws  -> [TxRequest]
+    
+    /**
      * Phase 1 (external signer): encrypt `data`, collect quotes, and return
      * the payment summary. `visibility` is `"public"` or `"private"`. The
      * prepared state is retained under the returned `upload_id` until
@@ -1198,6 +1218,41 @@ open func finalizeUploadWithProgress(uploadId: String, txHashes: [String: String
             completeFunc: ffi_ant_ffi_rust_future_complete_rust_buffer,
             freeFunc: ffi_ant_ffi_rust_future_free_rust_buffer,
             liftFunc: FfiConverterTypeExternalUploadResult_lift,
+            errorHandler: FfiConverterTypeClientError_lift
+        )
+}
+    
+    /**
+     * Phase 1.5 (external signer): build the ordered transactions the external
+     * wallet must sign to pay for a prepared upload — an ERC-20 `approve`
+     * followed by the vault payment call(s). This replaces the hand-rolled ABI
+     * encoding + hardcoded selectors that consumers used to carry.
+     *
+     * Sign each [`TxRequest`] in the returned order, waiting for each receipt,
+     * then finalize:
+     * - **wave-batch**: for each `"pay"` tx, map every entry in its
+     * `quote_hashes` to that tx's hash, then call [`Self::finalize_upload`];
+     * - **merkle**: read the winner pool hash from the `"pay"` receipt's
+     * `MerklePaymentMade` event and call [`Self::finalize_upload_merkle`].
+     *
+     * Returns an empty list when everything was already stored (nothing to
+     * pay). Only valid on a client built with `connect_for_external_signer` /
+     * `connect_from_devnet_manifest_external_signer`; other clients return
+     * [`ClientError::WalletNotConfigured`].
+     */
+open func paymentTransactions(uploadId: String)async throws  -> [TxRequest]  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_ant_ffi_fn_method_client_payment_transactions(
+                    self.uniffiClonePointer(),
+                    FfiConverterString.lower(uploadId)
+                )
+            },
+            pollFunc: ffi_ant_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_ant_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_ant_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceTypeTxRequest.lift,
             errorHandler: FfiConverterTypeClientError_lift
         )
 }
@@ -2075,6 +2130,121 @@ public func FfiConverterTypeFilePutPublicResult_lower(_ value: FilePutPublicResu
 
 
 /**
+ * On-chain configuration for a known Autonomi EVM network, so the app doesn't
+ * have to hardcode addresses or guess a chain id from an RPC URL string.
+ * Fetch with the free `network_info(name)` function.
+ */
+public struct NetworkInfo {
+    /**
+     * EVM chain id (e.g. 42161 Arbitrum One, 421614 Arbitrum Sepolia).
+     */
+    public var chainId: UInt32
+    /**
+     * 0x-prefixed ANT payment-token address.
+     */
+    public var tokenAddress: String
+    /**
+     * 0x-prefixed payment-vault address.
+     */
+    public var vaultAddress: String
+    /**
+     * Default HTTPS RPC URL for the network.
+     */
+    public var rpcUrl: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * EVM chain id (e.g. 42161 Arbitrum One, 421614 Arbitrum Sepolia).
+         */chainId: UInt32, 
+        /**
+         * 0x-prefixed ANT payment-token address.
+         */tokenAddress: String, 
+        /**
+         * 0x-prefixed payment-vault address.
+         */vaultAddress: String, 
+        /**
+         * Default HTTPS RPC URL for the network.
+         */rpcUrl: String) {
+        self.chainId = chainId
+        self.tokenAddress = tokenAddress
+        self.vaultAddress = vaultAddress
+        self.rpcUrl = rpcUrl
+    }
+}
+
+#if compiler(>=6)
+extension NetworkInfo: Sendable {}
+#endif
+
+
+extension NetworkInfo: Equatable, Hashable {
+    public static func ==(lhs: NetworkInfo, rhs: NetworkInfo) -> Bool {
+        if lhs.chainId != rhs.chainId {
+            return false
+        }
+        if lhs.tokenAddress != rhs.tokenAddress {
+            return false
+        }
+        if lhs.vaultAddress != rhs.vaultAddress {
+            return false
+        }
+        if lhs.rpcUrl != rhs.rpcUrl {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(chainId)
+        hasher.combine(tokenAddress)
+        hasher.combine(vaultAddress)
+        hasher.combine(rpcUrl)
+    }
+}
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNetworkInfo: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NetworkInfo {
+        return
+            try NetworkInfo(
+                chainId: FfiConverterUInt32.read(from: &buf), 
+                tokenAddress: FfiConverterString.read(from: &buf), 
+                vaultAddress: FfiConverterString.read(from: &buf), 
+                rpcUrl: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: NetworkInfo, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.chainId, into: &buf)
+        FfiConverterString.write(value.tokenAddress, into: &buf)
+        FfiConverterString.write(value.vaultAddress, into: &buf)
+        FfiConverterString.write(value.rpcUrl, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNetworkInfo_lift(_ buf: RustBuffer) throws -> NetworkInfo {
+    return try FfiConverterTypeNetworkInfo.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNetworkInfo_lower(_ value: NetworkInfo) -> RustBuffer {
+    return FfiConverterTypeNetworkInfo.lower(value)
+}
+
+
+/**
  * A single on-chain payment the external wallet must settle: one entry of the
  * `payForQuotes((address,uint256,bytes32)[])` call.
  */
@@ -2560,6 +2730,232 @@ public func FfiConverterTypeProgressUpdate_lower(_ value: ProgressUpdate) -> Rus
 
 
 /**
+ * Outcome of a settled transaction, from the `wait_for_receipt` free function.
+ */
+public struct TxReceipt {
+    /**
+     * `true` if the transaction succeeded (receipt status `0x1`), `false` if it
+     * reverted (`0x0`).
+     */
+    public var success: Bool
+    /**
+     * Gas units consumed (base-10 string).
+     */
+    public var gasUsed: String
+    /**
+     * Effective gas price paid in wei (base-10 string). Multiply by `gas_used`
+     * for the total gas cost.
+     */
+    public var effectiveGasPrice: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * `true` if the transaction succeeded (receipt status `0x1`), `false` if it
+         * reverted (`0x0`).
+         */success: Bool, 
+        /**
+         * Gas units consumed (base-10 string).
+         */gasUsed: String, 
+        /**
+         * Effective gas price paid in wei (base-10 string). Multiply by `gas_used`
+         * for the total gas cost.
+         */effectiveGasPrice: String) {
+        self.success = success
+        self.gasUsed = gasUsed
+        self.effectiveGasPrice = effectiveGasPrice
+    }
+}
+
+#if compiler(>=6)
+extension TxReceipt: Sendable {}
+#endif
+
+
+extension TxReceipt: Equatable, Hashable {
+    public static func ==(lhs: TxReceipt, rhs: TxReceipt) -> Bool {
+        if lhs.success != rhs.success {
+            return false
+        }
+        if lhs.gasUsed != rhs.gasUsed {
+            return false
+        }
+        if lhs.effectiveGasPrice != rhs.effectiveGasPrice {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(success)
+        hasher.combine(gasUsed)
+        hasher.combine(effectiveGasPrice)
+    }
+}
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeTxReceipt: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> TxReceipt {
+        return
+            try TxReceipt(
+                success: FfiConverterBool.read(from: &buf), 
+                gasUsed: FfiConverterString.read(from: &buf), 
+                effectiveGasPrice: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: TxReceipt, into buf: inout [UInt8]) {
+        FfiConverterBool.write(value.success, into: &buf)
+        FfiConverterString.write(value.gasUsed, into: &buf)
+        FfiConverterString.write(value.effectiveGasPrice, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTxReceipt_lift(_ buf: RustBuffer) throws -> TxReceipt {
+    return try FfiConverterTypeTxReceipt.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTxReceipt_lower(_ value: TxReceipt) -> RustBuffer {
+    return FfiConverterTypeTxReceipt.lower(value)
+}
+
+
+/**
+ * One transaction the external wallet must sign & send, in order, to pay for a
+ * prepared upload. Produced by [`Client::payment_transactions`].
+ *
+ * The app signs each `TxRequest` in the returned order (approve first, then the
+ * payment call), waiting for each receipt before the next.
+ */
+public struct TxRequest {
+    /**
+     * 0x-prefixed contract address to send the transaction to (token for
+     * `approve`, vault for the payment call).
+     */
+    public var to: String
+    /**
+     * 0x-prefixed ABI-encoded calldata for the transaction's `data` field.
+     */
+    public var data: String
+    /**
+     * `"approve"` (ERC-20 allowance) or `"pay"` (the vault payment call).
+     */
+    public var kind: String
+    /**
+     * Wave-batch `"pay"` only: the 0x-prefixed quote hashes this payment
+     * settles. After signing, map each of these to the resulting tx hash to
+     * build the `finalize_upload` map. Empty for `approve` and for merkle.
+     */
+    public var quoteHashes: [String]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * 0x-prefixed contract address to send the transaction to (token for
+         * `approve`, vault for the payment call).
+         */to: String, 
+        /**
+         * 0x-prefixed ABI-encoded calldata for the transaction's `data` field.
+         */data: String, 
+        /**
+         * `"approve"` (ERC-20 allowance) or `"pay"` (the vault payment call).
+         */kind: String, 
+        /**
+         * Wave-batch `"pay"` only: the 0x-prefixed quote hashes this payment
+         * settles. After signing, map each of these to the resulting tx hash to
+         * build the `finalize_upload` map. Empty for `approve` and for merkle.
+         */quoteHashes: [String]) {
+        self.to = to
+        self.data = data
+        self.kind = kind
+        self.quoteHashes = quoteHashes
+    }
+}
+
+#if compiler(>=6)
+extension TxRequest: Sendable {}
+#endif
+
+
+extension TxRequest: Equatable, Hashable {
+    public static func ==(lhs: TxRequest, rhs: TxRequest) -> Bool {
+        if lhs.to != rhs.to {
+            return false
+        }
+        if lhs.data != rhs.data {
+            return false
+        }
+        if lhs.kind != rhs.kind {
+            return false
+        }
+        if lhs.quoteHashes != rhs.quoteHashes {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(to)
+        hasher.combine(data)
+        hasher.combine(kind)
+        hasher.combine(quoteHashes)
+    }
+}
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeTxRequest: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> TxRequest {
+        return
+            try TxRequest(
+                to: FfiConverterString.read(from: &buf), 
+                data: FfiConverterString.read(from: &buf), 
+                kind: FfiConverterString.read(from: &buf), 
+                quoteHashes: FfiConverterSequenceString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: TxRequest, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.to, into: &buf)
+        FfiConverterString.write(value.data, into: &buf)
+        FfiConverterString.write(value.kind, into: &buf)
+        FfiConverterSequenceString.write(value.quoteHashes, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTxRequest_lift(_ buf: RustBuffer) throws -> TxRequest {
+    return try FfiConverterTypeTxRequest.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTxRequest_lower(_ value: TxRequest) -> RustBuffer {
+    return FfiConverterTypeTxRequest.lower(value)
+}
+
+
+/**
  * Error type for client operations.
  */
 public enum ClientError: Swift.Error {
@@ -3037,6 +3433,31 @@ fileprivate struct FfiConverterSequenceTypePoolCommitmentEntry: FfiConverterRust
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeTxRequest: FfiConverterRustBuffer {
+    typealias SwiftType = [TxRequest]
+
+    public static func write(_ value: [TxRequest], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeTxRequest.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [TxRequest] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [TxRequest]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeTxRequest.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterDictionaryStringString: FfiConverterRustBuffer {
     public static func write(_ value: [String: String], into buf: inout [UInt8]) {
         let len = Int32(value.count)
@@ -3105,6 +3526,61 @@ fileprivate func uniffiFutureContinuationCallback(handle: UInt64, pollResult: In
         print("uniffiFutureContinuationCallback invalid handle")
     }
 }
+/**
+ * Read the winning pool hash from a settled `payForMerkleTree` transaction, so
+ * the caller can pass it to `finalize_upload_merkle`. Finds the
+ * `MerklePaymentMade` log emitted by `vault_address` in the receipt and returns
+ * its indexed `winnerPoolHash` (topic1), 0x-prefixed. Replaces the app's
+ * hand-rolled log scan.
+ */
+public func merkleWinnerPoolHash(rpcUrl: String, vaultAddress: String, txHash: String)async throws  -> String  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_ant_ffi_fn_func_merkle_winner_pool_hash(FfiConverterString.lower(rpcUrl),FfiConverterString.lower(vaultAddress),FfiConverterString.lower(txHash)
+                )
+            },
+            pollFunc: ffi_ant_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_ant_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_ant_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterString.lift,
+            errorHandler: FfiConverterTypeClientError_lift
+        )
+}
+/**
+ * Look up the on-chain config for a known Autonomi EVM network by identifier,
+ * so callers don't hardcode addresses or infer a chain id from an RPC URL.
+ *
+ * `name` is `"arbitrum-one"` or `"arbitrum-sepolia-test"` (matching
+ * `evmlib::Network::identifier()`; `"arbitrum"` / `"arbitrum-sepolia"` are
+ * accepted aliases).
+ */
+public func networkInfo(name: String)throws  -> NetworkInfo  {
+    return try  FfiConverterTypeNetworkInfo_lift(try rustCallWithError(FfiConverterTypeClientError_lift) {
+    uniffi_ant_ffi_fn_func_network_info(
+        FfiConverterString.lower(name),$0
+    )
+})
+}
+/**
+ * Poll `rpc_url` for the receipt of `tx_hash`, returning once it's mined (or
+ * erroring on revert / after `timeout_secs`). Moves the app's hand-rolled
+ * `eth_getTransactionReceipt` polling loop into the SDK.
+ */
+public func waitForReceipt(rpcUrl: String, txHash: String, timeoutSecs: UInt64)async throws  -> TxReceipt  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_ant_ffi_fn_func_wait_for_receipt(FfiConverterString.lower(rpcUrl),FfiConverterString.lower(txHash),FfiConverterUInt64.lower(timeoutSecs)
+                )
+            },
+            pollFunc: ffi_ant_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_ant_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_ant_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeTxReceipt_lift,
+            errorHandler: FfiConverterTypeClientError_lift
+        )
+}
 
 private enum InitializationResult {
     case ok
@@ -3120,6 +3596,15 @@ private let initializationResult: InitializationResult = {
     let scaffolding_contract_version = ffi_ant_ffi_uniffi_contract_version()
     if bindings_contract_version != scaffolding_contract_version {
         return InitializationResult.contractVersionMismatch
+    }
+    if (uniffi_ant_ffi_checksum_func_merkle_winner_pool_hash() != 2925) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ant_ffi_checksum_func_network_info() != 27768) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ant_ffi_checksum_func_wait_for_receipt() != 5780) {
+        return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_ant_ffi_checksum_method_client_cancel_upload() != 19824) {
         return InitializationResult.apiChecksumMismatch
@@ -3167,6 +3652,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_ant_ffi_checksum_method_client_finalize_upload_with_progress() != 10031) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ant_ffi_checksum_method_client_payment_transactions() != 28846) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_ant_ffi_checksum_method_client_prepare_data_upload() != 1621) {
