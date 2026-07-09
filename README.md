@@ -11,7 +11,7 @@ In your `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/WithAutonomi/ant-swift.git", from: "0.0.3"),
+    .package(url: "https://github.com/WithAutonomi/ant-swift.git", from: "0.0.7"),
 ],
 targets: [
     .target(
@@ -93,6 +93,40 @@ let back = try await client.dataGetPublic(addressHex: pub.address)
 let priv = try await client.dataPutPrivate(data: Array(payload), paymentMode: "auto")
 let secret = try await client.dataGetPrivate(dataMapHex: priv.dataMap)
 ```
+
+### Upload a file from disk (recommended for large data)
+
+For anything larger than a small blob, upload **from a file path** rather than
+loading bytes into memory. `ant-core` streams the file through self-encryption
+and spills chunks to disk, so memory stays flat regardless of file size — the
+in-memory `dataPut*` / `chunkPut` APIs hold the whole payload in RAM.
+
+```swift
+// Preview the cost before paying (sampled — fast, confidence-aware).
+let est = try await client.estimateFileCost(path: fileURL.path, paymentMode: "auto")
+print("\(est.chunkCount) chunks · ~\(est.storageCostAtto) atto ANT · \(est.confidence)")
+
+// Public: retrievable by address.
+let put = try await client.fileUploadPublic(path: fileURL.path, paymentMode: "auto")
+
+// Private: keep the returned hex data map — it's the only way back in.
+let priv = try await client.fileUploadPrivate(path: fileURL.path, paymentMode: "auto")
+
+// Download straight to disk (streams; ProgressListener is required).
+final class NoopProgress: ProgressListener { func onProgress(update: ProgressUpdate) {} }
+let bytes = try await client.downloadPublicToFile(
+    addressHex: put.address, destPath: outURL.path, listener: NoopProgress())
+```
+
+`CostEstimate` fields: `fileSize`, `chunkCount`, `storageCostAtto` (storage in
+atto-ANT), `estimatedGasCostWei`, `paymentMode`, and `confidence` — a string
+(`priced_sample`, `verified_all_already_stored`, …) telling you how firm the
+estimate is, so you don't render a best-effort `0` as "free".
+
+> **Memory model.** File uploads and `download*ToFile` **stream** (constant
+> memory). The `dataPut*` / `dataGet*` / `chunk*` APIs load the full payload
+> into `[UInt8]` — fine for small data, avoid for large. Prefer the file-path
+> APIs on mobile.
 
 ### Error handling
 
