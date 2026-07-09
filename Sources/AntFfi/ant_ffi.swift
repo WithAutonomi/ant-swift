@@ -563,6 +563,28 @@ public protocol ClientProtocol: AnyObject, Sendable {
     func dataGetPublic(addressHex: String) async throws  -> Data
     
     /**
+     * Fetch a public data map by hex address and return it serialized (hex) —
+     * the inverse of `dataMapStore`. Returns just the data map, not the file
+     * content; use `dataGetPublic` to fetch the bytes.
+     */
+    func dataMapFetch(addressHex: String) async throws  -> String
+    
+    /**
+     * Publish an existing private data map as a public network chunk, returning
+     * its hex address. Lets a caller turn a previously-private upload (a hex
+     * data map from `dataPutPrivate` / `fileUploadPrivate`) into a shareable
+     * public address **without re-uploading the underlying file data**.
+     *
+     * Note: the file's data chunks are not re-stored, but the serialized data
+     * map is itself stored as one small public chunk — so this may store and
+     * pay for that single chunk (unless it is already on the network). On a
+     * client with no wallet (external-signer mode) storing an unpaid chunk
+     * will fail; use it on a wallet-backed client, or on data maps whose chunk
+     * is already stored.
+     */
+    func dataMapStore(dataMapHex: String) async throws  -> String
+    
+    /**
      * Upload private data. Returns the serialized data map (hex).
      */
     func dataPutPrivate(data: Data, paymentMode: String) async throws  -> DataPutPrivateResult
@@ -586,9 +608,33 @@ public protocol ClientProtocol: AnyObject, Sendable {
     func downloadPublicToFile(addressHex: String, destPath: String, listener: ProgressListener) async throws  -> UInt64
     
     /**
+     * Estimate the cost of uploading a file *before* preparing or paying for
+     * it. Samples a few of the file's chunk addresses and extrapolates, so it
+     * is fast (~seconds) and needs **no wallet** — safe to call in the
+     * external-signer flow to preview cost before `prepareFileUpload`.
+     *
+     * `payment_mode` is one of "auto", "merkle", or "single". Check
+     * `CostEstimate.confidence` before treating a `"0"` storage cost as free.
+     *
+     * This prices the file's data chunks only. A *public* upload additionally
+     * stores the serialized data map as one extra chunk, which is not included
+     * here — so treat the result as the data-storage estimate, not the exact
+     * guaranteed total of a public publish.
+     */
+    func estimateFileCost(path: String, paymentMode: String) async throws  -> CostEstimate
+    
+    /**
      * Download a file to disk by hex-encoded address.
      */
     func fileDownloadPublic(addressHex: String, destPath: String) async throws 
+    
+    /**
+     * Upload a file from disk privately. Returns the serialized data map (hex)
+     * rather than publishing it — the caller must keep it to retrieve the file
+     * later via `dataGetPrivate`. This is the private counterpart of
+     * `fileUploadPublic`, and the file-based analog of `dataPutPrivate`.
+     */
+    func fileUploadPrivate(path: String, paymentMode: String) async throws  -> FilePutPrivateResult
     
     /**
      * Upload a file from disk (public). Returns the address.
@@ -679,6 +725,15 @@ public protocol ClientProtocol: AnyObject, Sendable {
      * a file on disk.
      */
     func prepareFileUpload(path: String, visibility: String) async throws  -> PreparedUploadInfo
+    
+    /**
+     * Phase 1 (external signer): same as `prepareFileUpload` but reports
+     * encryption/quoting progress to `listener`. Encrypting a large file to
+     * spill can take seconds, so this surfaces the `"encrypting"` and
+     * `"quoting"` phases the plain `prepareFileUpload` runs silently. (Only
+     * files support prepare progress; ant-core has no in-memory data variant.)
+     */
+    func prepareFileUploadWithProgress(path: String, visibility: String, listener: ProgressListener) async throws  -> PreparedUploadInfo
     
     /**
      * Approve token spend for storage payments (one-time).
@@ -989,6 +1044,58 @@ open func dataGetPublic(addressHex: String)async throws  -> Data  {
 }
     
     /**
+     * Fetch a public data map by hex address and return it serialized (hex) —
+     * the inverse of `dataMapStore`. Returns just the data map, not the file
+     * content; use `dataGetPublic` to fetch the bytes.
+     */
+open func dataMapFetch(addressHex: String)async throws  -> String  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_ant_ffi_fn_method_client_data_map_fetch(
+                    self.uniffiClonePointer(),
+                    FfiConverterString.lower(addressHex)
+                )
+            },
+            pollFunc: ffi_ant_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_ant_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_ant_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterString.lift,
+            errorHandler: FfiConverterTypeClientError_lift
+        )
+}
+    
+    /**
+     * Publish an existing private data map as a public network chunk, returning
+     * its hex address. Lets a caller turn a previously-private upload (a hex
+     * data map from `dataPutPrivate` / `fileUploadPrivate`) into a shareable
+     * public address **without re-uploading the underlying file data**.
+     *
+     * Note: the file's data chunks are not re-stored, but the serialized data
+     * map is itself stored as one small public chunk — so this may store and
+     * pay for that single chunk (unless it is already on the network). On a
+     * client with no wallet (external-signer mode) storing an unpaid chunk
+     * will fail; use it on a wallet-backed client, or on data maps whose chunk
+     * is already stored.
+     */
+open func dataMapStore(dataMapHex: String)async throws  -> String  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_ant_ffi_fn_method_client_data_map_store(
+                    self.uniffiClonePointer(),
+                    FfiConverterString.lower(dataMapHex)
+                )
+            },
+            pollFunc: ffi_ant_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_ant_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_ant_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterString.lift,
+            errorHandler: FfiConverterTypeClientError_lift
+        )
+}
+    
+    /**
      * Upload private data. Returns the serialized data map (hex).
      */
 open func dataPutPrivate(data: Data, paymentMode: String)async throws  -> DataPutPrivateResult  {
@@ -1072,6 +1179,37 @@ open func downloadPublicToFile(addressHex: String, destPath: String, listener: P
 }
     
     /**
+     * Estimate the cost of uploading a file *before* preparing or paying for
+     * it. Samples a few of the file's chunk addresses and extrapolates, so it
+     * is fast (~seconds) and needs **no wallet** — safe to call in the
+     * external-signer flow to preview cost before `prepareFileUpload`.
+     *
+     * `payment_mode` is one of "auto", "merkle", or "single". Check
+     * `CostEstimate.confidence` before treating a `"0"` storage cost as free.
+     *
+     * This prices the file's data chunks only. A *public* upload additionally
+     * stores the serialized data map as one extra chunk, which is not included
+     * here — so treat the result as the data-storage estimate, not the exact
+     * guaranteed total of a public publish.
+     */
+open func estimateFileCost(path: String, paymentMode: String)async throws  -> CostEstimate  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_ant_ffi_fn_method_client_estimate_file_cost(
+                    self.uniffiClonePointer(),
+                    FfiConverterString.lower(path),FfiConverterString.lower(paymentMode)
+                )
+            },
+            pollFunc: ffi_ant_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_ant_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_ant_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeCostEstimate_lift,
+            errorHandler: FfiConverterTypeClientError_lift
+        )
+}
+    
+    /**
      * Download a file to disk by hex-encoded address.
      */
 open func fileDownloadPublic(addressHex: String, destPath: String)async throws   {
@@ -1087,6 +1225,29 @@ open func fileDownloadPublic(addressHex: String, destPath: String)async throws  
             completeFunc: ffi_ant_ffi_rust_future_complete_void,
             freeFunc: ffi_ant_ffi_rust_future_free_void,
             liftFunc: { $0 },
+            errorHandler: FfiConverterTypeClientError_lift
+        )
+}
+    
+    /**
+     * Upload a file from disk privately. Returns the serialized data map (hex)
+     * rather than publishing it — the caller must keep it to retrieve the file
+     * later via `dataGetPrivate`. This is the private counterpart of
+     * `fileUploadPublic`, and the file-based analog of `dataPutPrivate`.
+     */
+open func fileUploadPrivate(path: String, paymentMode: String)async throws  -> FilePutPrivateResult  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_ant_ffi_fn_method_client_file_upload_private(
+                    self.uniffiClonePointer(),
+                    FfiConverterString.lower(path),FfiConverterString.lower(paymentMode)
+                )
+            },
+            pollFunc: ffi_ant_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_ant_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_ant_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeFilePutPrivateResult_lift,
             errorHandler: FfiConverterTypeClientError_lift
         )
 }
@@ -1291,6 +1452,30 @@ open func prepareFileUpload(path: String, visibility: String)async throws  -> Pr
                 uniffi_ant_ffi_fn_method_client_prepare_file_upload(
                     self.uniffiClonePointer(),
                     FfiConverterString.lower(path),FfiConverterString.lower(visibility)
+                )
+            },
+            pollFunc: ffi_ant_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_ant_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_ant_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypePreparedUploadInfo_lift,
+            errorHandler: FfiConverterTypeClientError_lift
+        )
+}
+    
+    /**
+     * Phase 1 (external signer): same as `prepareFileUpload` but reports
+     * encryption/quoting progress to `listener`. Encrypting a large file to
+     * spill can take seconds, so this surfaces the `"encrypting"` and
+     * `"quoting"` phases the plain `prepareFileUpload` runs silently. (Only
+     * files support prepare progress; ant-core has no in-memory data variant.)
+     */
+open func prepareFileUploadWithProgress(path: String, visibility: String, listener: ProgressListener)async throws  -> PreparedUploadInfo  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_ant_ffi_fn_method_client_prepare_file_upload_with_progress(
+                    self.uniffiClonePointer(),
+                    FfiConverterString.lower(path),FfiConverterString.lower(visibility),FfiConverterCallbackInterfaceProgressListener_lower(listener)
                 )
             },
             pollFunc: ffi_ant_ffi_rust_future_poll_rust_buffer,
@@ -1734,6 +1919,168 @@ public func FfiConverterTypeChunkPutResult_lower(_ value: ChunkPutResult) -> Rus
 
 
 /**
+ * Estimated cost of uploading a file, produced *before* any payment by
+ * sampling a few of the file's chunk addresses and extrapolating. No wallet
+ * is required. Use this to show the user a cost preview before preparing the
+ * real upload.
+ */
+public struct CostEstimate {
+    /**
+     * Original file size in bytes.
+     */
+    public var fileSize: UInt64
+    /**
+     * Number of data chunks the file would split into (excludes the extra
+     * data-map chunk added for public uploads).
+     */
+    public var chunkCount: UInt64
+    /**
+     * Estimated storage cost in atto-tokens (base-10 string; may exceed u64).
+     */
+    public var storageCostAtto: String
+    /**
+     * Rough estimated gas cost in wei (base-10 string). A heuristic based on
+     * chunk count and payment mode, NOT a live gas-price query.
+     */
+    public var estimatedGasCostWei: String
+    /**
+     * Payment mode that would be used: "auto", "merkle", or "single".
+     */
+    public var paymentMode: String
+    /**
+     * How much to trust `storage_cost_atto`:
+     * - `"priced_sample"` — extrapolated from at least one live quote (normal case).
+     * - `"verified_all_already_stored"` — every chunk was sampled and already
+     * stored; cost is exactly `"0"` (genuinely free).
+     * - `"all_samples_already_stored_incomplete"` — every *sampled* chunk was
+     * already stored but the tail was unsampled; `"0"` is a best-effort guess
+     * the real upload reconciles at payment time. Render as "likely already
+     * stored", not guaranteed-free.
+     */
+    public var confidence: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Original file size in bytes.
+         */fileSize: UInt64, 
+        /**
+         * Number of data chunks the file would split into (excludes the extra
+         * data-map chunk added for public uploads).
+         */chunkCount: UInt64, 
+        /**
+         * Estimated storage cost in atto-tokens (base-10 string; may exceed u64).
+         */storageCostAtto: String, 
+        /**
+         * Rough estimated gas cost in wei (base-10 string). A heuristic based on
+         * chunk count and payment mode, NOT a live gas-price query.
+         */estimatedGasCostWei: String, 
+        /**
+         * Payment mode that would be used: "auto", "merkle", or "single".
+         */paymentMode: String, 
+        /**
+         * How much to trust `storage_cost_atto`:
+         * - `"priced_sample"` — extrapolated from at least one live quote (normal case).
+         * - `"verified_all_already_stored"` — every chunk was sampled and already
+         * stored; cost is exactly `"0"` (genuinely free).
+         * - `"all_samples_already_stored_incomplete"` — every *sampled* chunk was
+         * already stored but the tail was unsampled; `"0"` is a best-effort guess
+         * the real upload reconciles at payment time. Render as "likely already
+         * stored", not guaranteed-free.
+         */confidence: String) {
+        self.fileSize = fileSize
+        self.chunkCount = chunkCount
+        self.storageCostAtto = storageCostAtto
+        self.estimatedGasCostWei = estimatedGasCostWei
+        self.paymentMode = paymentMode
+        self.confidence = confidence
+    }
+}
+
+#if compiler(>=6)
+extension CostEstimate: Sendable {}
+#endif
+
+
+extension CostEstimate: Equatable, Hashable {
+    public static func ==(lhs: CostEstimate, rhs: CostEstimate) -> Bool {
+        if lhs.fileSize != rhs.fileSize {
+            return false
+        }
+        if lhs.chunkCount != rhs.chunkCount {
+            return false
+        }
+        if lhs.storageCostAtto != rhs.storageCostAtto {
+            return false
+        }
+        if lhs.estimatedGasCostWei != rhs.estimatedGasCostWei {
+            return false
+        }
+        if lhs.paymentMode != rhs.paymentMode {
+            return false
+        }
+        if lhs.confidence != rhs.confidence {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(fileSize)
+        hasher.combine(chunkCount)
+        hasher.combine(storageCostAtto)
+        hasher.combine(estimatedGasCostWei)
+        hasher.combine(paymentMode)
+        hasher.combine(confidence)
+    }
+}
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeCostEstimate: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> CostEstimate {
+        return
+            try CostEstimate(
+                fileSize: FfiConverterUInt64.read(from: &buf), 
+                chunkCount: FfiConverterUInt64.read(from: &buf), 
+                storageCostAtto: FfiConverterString.read(from: &buf), 
+                estimatedGasCostWei: FfiConverterString.read(from: &buf), 
+                paymentMode: FfiConverterString.read(from: &buf), 
+                confidence: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: CostEstimate, into buf: inout [UInt8]) {
+        FfiConverterUInt64.write(value.fileSize, into: &buf)
+        FfiConverterUInt64.write(value.chunkCount, into: &buf)
+        FfiConverterString.write(value.storageCostAtto, into: &buf)
+        FfiConverterString.write(value.estimatedGasCostWei, into: &buf)
+        FfiConverterString.write(value.paymentMode, into: &buf)
+        FfiConverterString.write(value.confidence, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCostEstimate_lift(_ buf: RustBuffer) throws -> CostEstimate {
+    return try FfiConverterTypeCostEstimate.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCostEstimate_lower(_ value: CostEstimate) -> RustBuffer {
+    return FfiConverterTypeCostEstimate.lower(value)
+}
+
+
+/**
  * Result of a private data upload (data map returned to caller).
  */
 public struct DataPutPrivateResult {
@@ -2055,6 +2402,79 @@ public func FfiConverterTypeExternalUploadResult_lift(_ buf: RustBuffer) throws 
 #endif
 public func FfiConverterTypeExternalUploadResult_lower(_ value: ExternalUploadResult) -> RustBuffer {
     return FfiConverterTypeExternalUploadResult.lower(value)
+}
+
+
+/**
+ * Result of uploading a file (private). The data map is returned to the
+ * caller instead of being published; keep it secret — it is required to
+ * retrieve the file and is not recoverable from the network.
+ */
+public struct FilePutPrivateResult {
+    /**
+     * Hex-encoded serialized data map (caller keeps this secret).
+     */
+    public var dataMap: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Hex-encoded serialized data map (caller keeps this secret).
+         */dataMap: String) {
+        self.dataMap = dataMap
+    }
+}
+
+#if compiler(>=6)
+extension FilePutPrivateResult: Sendable {}
+#endif
+
+
+extension FilePutPrivateResult: Equatable, Hashable {
+    public static func ==(lhs: FilePutPrivateResult, rhs: FilePutPrivateResult) -> Bool {
+        if lhs.dataMap != rhs.dataMap {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(dataMap)
+    }
+}
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFilePutPrivateResult: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FilePutPrivateResult {
+        return
+            try FilePutPrivateResult(
+                dataMap: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FilePutPrivateResult, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.dataMap, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFilePutPrivateResult_lift(_ buf: RustBuffer) throws -> FilePutPrivateResult {
+    return try FfiConverterTypeFilePutPrivateResult.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFilePutPrivateResult_lower(_ value: FilePutPrivateResult) -> RustBuffer {
+    return FfiConverterTypeFilePutPrivateResult.lower(value)
 }
 
 
@@ -2640,11 +3060,12 @@ public func FfiConverterTypePreparedUploadInfo_lower(_ value: PreparedUploadInfo
  * `phase` is one of the following strings. Note which methods actually emit
  * each phase today:
  *
- * - **upload** — `"storing"` only, emitted by `finalize_upload_with_progress`
- * as chunks land on the network. The `"encrypting"` and `"quoting"` phases
- * exist in the enum for completeness but are **not** currently surfaced by
- * the external-signer FFI: they happen inside `prepare_*`, which does not
- * yet take a listener. (A prepare-with-progress API is a possible follow-up.)
+ * - **upload** — `"encrypting"` then `"quoting"`, emitted by
+ * `prepare_file_upload_with_progress` while the file is encrypted and
+ * quoted, then `"storing"`, emitted by `finalize_upload_with_progress` as
+ * chunks land on the network. (The plain `prepare_file_upload` /
+ * `prepare_data_upload` and the in-memory `prepare_data_upload` path take
+ * no listener, so they surface no encrypt/quote progress.)
  * - **download** — `"resolving"` then `"downloading"`, emitted by the
  * `download_*_to_file` methods.
  *
@@ -3624,6 +4045,12 @@ private let initializationResult: InitializationResult = {
     if (uniffi_ant_ffi_checksum_method_client_data_get_public() != 7309) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_ant_ffi_checksum_method_client_data_map_fetch() != 53911) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ant_ffi_checksum_method_client_data_map_store() != 55538) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_ant_ffi_checksum_method_client_data_put_private() != 63662) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -3636,7 +4063,13 @@ private let initializationResult: InitializationResult = {
     if (uniffi_ant_ffi_checksum_method_client_download_public_to_file() != 59266) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_ant_ffi_checksum_method_client_estimate_file_cost() != 12371) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_ant_ffi_checksum_method_client_file_download_public() != 9845) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ant_ffi_checksum_method_client_file_upload_private() != 16834) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_ant_ffi_checksum_method_client_file_upload_public() != 25369) {
@@ -3661,6 +4094,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_ant_ffi_checksum_method_client_prepare_file_upload() != 27493) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ant_ffi_checksum_method_client_prepare_file_upload_with_progress() != 33945) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_ant_ffi_checksum_method_client_wallet_approve() != 45082) {
