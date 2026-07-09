@@ -33,8 +33,9 @@ cargo run --release --example start-local-devnet --features devnet
 ```
 
 Leave it running. It writes the manifest at
-`~/Library/Application Support/ant/devnet-manifest.json` (hardcoded
-path in `ContentView.swift`).
+`~/Library/Application Support/ant/devnet-manifest.json`. The app resolves this
+path per-machine (`ContentView.swift` — via `SIMULATOR_HOST_HOME` on the
+simulator, `NSHomeDirectory()` on macOS), so no per-user editing is needed.
 
 ## Run
 
@@ -52,8 +53,9 @@ Or all from the command line:
 xcodebuild -scheme AntSwiftDemo -destination 'platform=macOS' build
 open ./build/Debug/AntSwiftDemo.app
 
-# iOS Simulator
-xcodebuild -scheme AntSwiftDemo -destination 'platform=iOS Simulator,name=iPhone 17' build
+# iOS Simulator — the AntFfi xcframework is arm64-only, so target a concrete
+# arm64 simulator, NOT 'generic/platform=iOS Simulator' (which pulls x86_64).
+xcodebuild -scheme AntSwiftDemo -destination 'platform=iOS Simulator,name=iPhone 17 Pro' build
 xcrun simctl install booted ./build/Debug-iphonesimulator/AntSwiftDemo.app
 xcrun simctl launch booted com.autonomi.examples.AntSwiftDemo
 ```
@@ -71,8 +73,6 @@ xcrun simctl launch booted com.autonomi.examples.AntSwiftDemo
 
 - This is a **devnet** demo. Production wallets, payment flows, and
   bootstrap discovery look different.
-- The manifest path is hardcoded to the macOS user's home. For a
-  different machine, edit `ContentView.swift` (`manifestPath`).
 - The macOS build disables App Sandbox so the app can read the
   manifest from `~/Library/Application Support/ant/` and reach the
   devnet over loopback. Don't ship a real app with these settings.
