@@ -9,10 +9,15 @@ struct ContentView: View {
     @State private var status: String = "Idle. Start a local devnet, then tap Upload."
     @State private var busy: Bool = false
 
-    /// Path the devnet writes its manifest to on the host. The iOS Simulator
-    /// shares the macOS filesystem so this absolute path is reachable from
-    /// inside the sim too — no env-var wiring required.
-    private let manifestPath = "/Users/nic/Library/Application Support/ant/devnet-manifest.json"
+    /// Path the devnet writes its manifest to on the host, resolved per-machine
+    /// (works for any user). On the iOS Simulator the shared host home is exposed
+    /// via `SIMULATOR_HOST_HOME`; on macOS the app runs on the host, so
+    /// `NSHomeDirectory()` is already the host home.
+    private var manifestPath: String {
+        let home = ProcessInfo.processInfo.environment["SIMULATOR_HOST_HOME"]
+            ?? NSHomeDirectory()
+        return "\(home)/Library/Application Support/ant/devnet-manifest.json"
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
