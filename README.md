@@ -179,8 +179,13 @@ progress).
 
 ## Versioning
 
-Releases are cut in lockstep with [`ant-sdk`](https://github.com/WithAutonomi/ant-sdk):
-a tag `vX.Y.Z` in `ant-sdk` triggers a matching `vX.Y.Z` release here.
+Releases are built from [`ant-sdk`](https://github.com/WithAutonomi/ant-sdk)'s
+`ffi/` source and published from this repo via the manual
+[`publish-ffi`](.github/workflows/publish-ffi.yml) workflow (see
+[RELEASING.md](RELEASING.md)): each release bumps `Package.swift` to the new
+asset URL + checksum, commits, then tags `vX.Y.Z` here. The Android SDK
+([`ant-android`](https://github.com/WithAutonomi/ant-android)) is published at
+the same version to [`ant-maven`](https://github.com/WithAutonomi/ant-maven).
 
 ## License
 
