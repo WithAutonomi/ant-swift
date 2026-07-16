@@ -14,7 +14,8 @@ let package = Package(
     targets: [
         // Native Rust library packaged as an .xcframework with slices for
         // iOS device, iOS simulator (arm64), and macOS arm64.
-        // URL + checksum are rewritten by ant-sdk's release CI on every tag.
+        // URL + checksum are rewritten by this repo's publish-ffi workflow on
+        // each release (manual dispatch — see RELEASING.md).
         .binaryTarget(
             name: "ant_ffiFFI",
             url: "https://github.com/WithAutonomi/ant-swift/releases/download/v0.0.7/AntFfi.xcframework.zip",
