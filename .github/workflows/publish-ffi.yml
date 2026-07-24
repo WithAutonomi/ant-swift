@@ -128,11 +128,17 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
+          # RC tags (anything with a '-', e.g. v0.0.8-rc.1) publish as a
+          # pre-release so the repo's "Latest" badge stays on the newest stable.
+          # SwiftPM `from:` ranges exclude prereleases either way.
+          prerelease=""
+          case "${{ inputs.release_tag }}" in *-*) prerelease="--prerelease" ;; esac
           gh release create "${{ inputs.release_tag }}" \
             "${{ steps.ffi.outputs.zip }}" \
             --repo "${{ github.repository }}" \
             --target "${{ steps.bump.outputs.sha }}" \
             --title "${{ inputs.release_tag }}" \
+            $prerelease \
             --notes "AntFfi.xcframework built from ant-sdk @ \`${{ inputs.ant_sdk_ref }}\`. sha256: \`${{ steps.ffi.outputs.checksum }}\`"
 
       - name: Verify published asset matches the checksum

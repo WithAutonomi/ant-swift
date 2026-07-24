@@ -46,6 +46,8 @@ git commit -am "release: AntFfi $TAG"
 git push origin main
 
 # 3. Create the release/tag AT the bump commit and upload the zip
+#    RC tags (e.g. v0.0.9-rc.1): add --prerelease so the repo's "Latest"
+#    release stays on the newest stable.
 gh release create "$TAG" ../ant-sdk/ffi/build/AntFfi.xcframework.zip \
   --repo WithAutonomi/ant-swift --target "$(git rev-parse HEAD)" --title "$TAG"
 
@@ -66,9 +68,12 @@ gh workflow run publish-ffi.yml --repo WithAutonomi/ant-swift \
 
 It checks out `ant-sdk` at `ant_sdk_ref`, runs `build-swift.sh`, commits the
 `Package.swift`+glue bump to `main`, creates the release/tag **at that commit**,
-and verifies the published asset's checksum. It pushes the bump directly to
-`main`, so it requires an **unprotected `main`** — if `main` becomes protected,
-fall back to Option A (or split B into a bump-PR + a post-merge release step).
+and verifies the published asset's checksum. Tags containing `-` (RCs like
+`v0.0.8-rc.1`) are published as **pre-releases** automatically, so GitHub's
+"Latest" badge keeps pointing at the newest stable. It pushes the bump directly
+to `main`, so it requires an **unprotected `main`** — if `main` becomes
+protected, fall back to Option A (or split B into a bump-PR + a post-merge
+release step).
 
 ## History / notes
 
