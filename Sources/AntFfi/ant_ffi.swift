@@ -587,12 +587,12 @@ public protocol ClientProtocol: AnyObject, Sendable {
     /**
      * Upload private data. Returns the serialized data map (hex).
      */
-    func dataPutPrivate(data: Data, paymentMode: String) async throws  -> DataPutPrivateResult
+    func dataPutPrivate(data: Data, paymentMode: PaymentMode) async throws  -> DataPutPrivateResult
     
     /**
      * Upload public data. Returns the address of the stored data map.
      */
-    func dataPutPublic(data: Data, paymentMode: String) async throws  -> DataPutPublicResult
+    func dataPutPublic(data: Data, paymentMode: PaymentMode) async throws  -> DataPutPublicResult
     
     /**
      * Download private data by hex-encoded data map straight to a file on
@@ -602,7 +602,7 @@ public protocol ClientProtocol: AnyObject, Sendable {
     
     /**
      * Download public data by address straight to a file on disk, reporting
-     * live progress (`"resolving"` then `"downloading"` phases). Returns bytes
+     * live progress (`Resolving` then `Downloading` phases). Returns bytes
      * written.
      */
     func downloadPublicToFile(addressHex: String, destPath: String, listener: ProgressListener) async throws  -> UInt64
@@ -613,15 +613,33 @@ public protocol ClientProtocol: AnyObject, Sendable {
      * is fast (~seconds) and needs **no wallet** — safe to call in the
      * external-signer flow to preview cost before `prepareFileUpload`.
      *
-     * `payment_mode` is one of "auto", "merkle", or "single". Check
-     * `CostEstimate.confidence` before treating a `"0"` storage cost as free.
+     * Check `CostEstimate.confidence` before treating a `"0"` storage cost
+     * as free.
      *
      * This prices the file's data chunks only. A *public* upload additionally
      * stores the serialized data map as one extra chunk, which is not included
      * here — so treat the result as the data-storage estimate, not the exact
      * guaranteed total of a public publish.
      */
-    func estimateFileCost(path: String, paymentMode: String) async throws  -> CostEstimate
+    func estimateFileCost(path: String, paymentMode: PaymentMode) async throws  -> CostEstimate
+    
+    /**
+     * Same as [`Self::estimate_file_cost`] but reports live progress to
+     * `listener` (the `Encrypting` phase). Estimating requires
+     * self-encrypting the whole file to derive chunk addresses, which takes
+     * real time for large files — without progress, a multi-GB estimate looks
+     * like a hang.
+     */
+    func estimateFileCostWithProgress(path: String, paymentMode: PaymentMode, listener: ProgressListener) async throws  -> CostEstimate
+    
+    /**
+     * Download a private file to disk by hex-encoded data map, without a
+     * progress listener — the no-progress counterpart of
+     * [`Self::download_private_to_file`], mirroring how
+     * [`Self::file_download_public`] pairs with
+     * [`Self::download_public_to_file`].
+     */
+    func fileDownloadPrivate(dataMapHex: String, destPath: String) async throws 
     
     /**
      * Download a file to disk by hex-encoded address.
@@ -634,12 +652,32 @@ public protocol ClientProtocol: AnyObject, Sendable {
      * later via `dataGetPrivate`. This is the private counterpart of
      * `fileUploadPublic`, and the file-based analog of `dataPutPrivate`.
      */
-    func fileUploadPrivate(path: String, paymentMode: String) async throws  -> FilePutPrivateResult
+    func fileUploadPrivate(path: String, paymentMode: PaymentMode) async throws  -> FilePutPrivateResult
     
     /**
-     * Upload a file from disk (public). Returns the address.
+     * Same as [`Self::file_upload_private`] but reports live progress to
+     * `listener` (the `Encrypting`, `Quoting` and `Storing` upload
+     * phases). See [`Self::file_upload_public_with_progress`].
      */
-    func fileUploadPublic(path: String, paymentMode: String) async throws  -> FilePutPublicResult
+    func fileUploadPrivateWithProgress(path: String, paymentMode: PaymentMode, listener: ProgressListener) async throws  -> FilePutPrivateResult
+    
+    /**
+     * Upload a file from disk (public). The serialized data map is stored as
+     * part of the same upload payment batch — one payment covers the file's
+     * chunks and the data-map chunk. Returns the shareable address plus
+     * chunk/cost details.
+     */
+    func fileUploadPublic(path: String, paymentMode: PaymentMode) async throws  -> FilePutPublicResult
+    
+    /**
+     * Same as [`Self::file_upload_public`] but reports live progress to
+     * `listener`: the `Encrypting`, `Quoting` and `Storing` upload phases
+     * as the file is self-encrypted, quoted and its chunks land on the network.
+     * Use this on the wallet-backed (built-in payment) path to drive a progress
+     * bar; the external-signer path uses the `prepare`/`finalize_*_with_progress`
+     * pair instead.
+     */
+    func fileUploadPublicWithProgress(path: String, paymentMode: PaymentMode, listener: ProgressListener) async throws  -> FilePutPublicResult
     
     /**
      * Phase 2 (external signer): after the external wallet has paid
@@ -669,7 +707,8 @@ public protocol ClientProtocol: AnyObject, Sendable {
      * `payForMerkleTree`, finalize by supplying the `winner_pool_hash`
      * (0x-prefixed hex, 32 bytes) read from the `MerklePaymentMade` event in
      * the payment receipt. Use this for uploads whose
-     * `PreparedUploadInfo.payment_type == "merkle"`; wave-batch uploads must
+     * `PreparedUploadInfo.payment_type` is [`crate::PaymentType::Merkle`];
+     * wave-batch uploads must
      * use [`Self::finalize_upload`] (this rejects them with a clear error, and
      * vice versa, without consuming the prepared upload).
      *
@@ -681,13 +720,13 @@ public protocol ClientProtocol: AnyObject, Sendable {
     
     /**
      * Same as [`Self::finalize_upload_merkle`] but reports live storing
-     * progress via `listener` (the `"storing"` phase).
+     * progress via `listener` (the `Storing` phase).
      */
     func finalizeUploadMerkleWithProgress(uploadId: String, winnerPoolHash: String, listener: ProgressListener) async throws  -> ExternalUploadResult
     
     /**
      * Same as [`Self::finalize_upload`] but reports live storing progress:
-     * `listener` gets `"storing"` updates (`done`/`total` chunks) as chunks
+     * `listener` gets `Storing` updates (`done`/`total` chunks) as chunks
      * land on the network.
      */
     func finalizeUploadWithProgress(uploadId: String, txHashes: [String: String], listener: ProgressListener) async throws  -> ExternalUploadResult
@@ -714,26 +753,26 @@ public protocol ClientProtocol: AnyObject, Sendable {
     
     /**
      * Phase 1 (external signer): encrypt `data`, collect quotes, and return
-     * the payment summary. `visibility` is `"public"` or `"private"`. The
+     * the payment summary. The
      * prepared state is retained under the returned `upload_id` until
      * [`Self::finalize_upload`].
      */
-    func prepareDataUpload(data: Data, visibility: String) async throws  -> PreparedUploadInfo
+    func prepareDataUpload(data: Data, visibility: Visibility) async throws  -> PreparedUploadInfo
     
     /**
      * Phase 1 (external signer): same as [`Self::prepare_data_upload`] but for
      * a file on disk.
      */
-    func prepareFileUpload(path: String, visibility: String) async throws  -> PreparedUploadInfo
+    func prepareFileUpload(path: String, visibility: Visibility) async throws  -> PreparedUploadInfo
     
     /**
      * Phase 1 (external signer): same as `prepareFileUpload` but reports
      * encryption/quoting progress to `listener`. Encrypting a large file to
-     * spill can take seconds, so this surfaces the `"encrypting"` and
-     * `"quoting"` phases the plain `prepareFileUpload` runs silently. (Only
+     * spill can take seconds, so this surfaces the `Encrypting` and
+     * `Quoting` phases the plain `prepareFileUpload` runs silently. (Only
      * files support prepare progress; ant-core has no in-memory data variant.)
      */
-    func prepareFileUploadWithProgress(path: String, visibility: String, listener: ProgressListener) async throws  -> PreparedUploadInfo
+    func prepareFileUploadWithProgress(path: String, visibility: Visibility, listener: ProgressListener) async throws  -> PreparedUploadInfo
     
     /**
      * Approve token spend for storage payments (one-time).
@@ -798,13 +837,89 @@ open class Client: ClientProtocol, @unchecked Sendable {
 
     
     /**
-     * Connect to the network using explicit bootstrap peers.
+     * Connect to the network using explicit bootstrap peers
+     * (`/ip4/<ip>/udp/<port>/quic` multiaddr strings).
+     *
+     * `data_dir` overrides the directory Autonomi's local state (bootstrap
+     * cache, config) lives under. **Required on Android** — pass the app's
+     * files directory (`context.filesDir`); Android processes have no
+     * `HOME`, so connecting without it fails with `InitializationFailed`
+     * (`HomeDirNotFound`). Leave `None` on iOS / desktop to use the
+     * platform default.
      */
-public static func connect(peers: [String])async throws  -> Client  {
+public static func connect(peers: [String], dataDir: String? = nil)async throws  -> Client  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
-                uniffi_ant_ffi_fn_constructor_client_connect(FfiConverterSequenceString.lower(peers)
+                uniffi_ant_ffi_fn_constructor_client_connect(FfiConverterSequenceString.lower(peers),FfiConverterOptionString.lower(dataDir)
+                )
+            },
+            pollFunc: ffi_ant_ffi_rust_future_poll_pointer,
+            completeFunc: ffi_ant_ffi_rust_future_complete_pointer,
+            freeFunc: ffi_ant_ffi_rust_future_free_pointer,
+            liftFunc: FfiConverterTypeClient_lift,
+            errorHandler: FfiConverterTypeClientError_lift
+        )
+}
+    
+    /**
+     * Connect to the Autonomi **production network** using the bootstrap
+     * peers vendored into the SDK — no configuration needed. Read-only
+     * client; for uploads use [`Self::connect_default_with_wallet`] or
+     * [`Self::connect_default_for_external_signer`].
+     *
+     * `data_dir`: see [`Self::connect`].
+     */
+public static func connectDefault(dataDir: String? = nil)async throws  -> Client  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_ant_ffi_fn_constructor_client_connect_default(FfiConverterOptionString.lower(dataDir)
+                )
+            },
+            pollFunc: ffi_ant_ffi_rust_future_poll_pointer,
+            completeFunc: ffi_ant_ffi_rust_future_complete_pointer,
+            freeFunc: ffi_ant_ffi_rust_future_free_pointer,
+            liftFunc: FfiConverterTypeClient_lift,
+            errorHandler: FfiConverterTypeClientError_lift
+        )
+}
+    
+    /**
+     * [`Self::connect_default`] configured for the **external-signer** flow
+     * (mobile wallets / WalletConnect): production peers + production EVM
+     * network for quotes, no wallet attached. Pay via `prepare_*` + your
+     * signer + `finalize_*`.
+     *
+     * `data_dir`: see [`Self::connect`].
+     */
+public static func connectDefaultForExternalSigner(dataDir: String? = nil)async throws  -> Client  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_ant_ffi_fn_constructor_client_connect_default_for_external_signer(FfiConverterOptionString.lower(dataDir)
+                )
+            },
+            pollFunc: ffi_ant_ffi_rust_future_poll_pointer,
+            completeFunc: ffi_ant_ffi_rust_future_complete_pointer,
+            freeFunc: ffi_ant_ffi_rust_future_free_pointer,
+            liftFunc: FfiConverterTypeClient_lift,
+            errorHandler: FfiConverterTypeClientError_lift
+        )
+}
+    
+    /**
+     * [`Self::connect_default`] with a wallet attached for write operations,
+     * preset for the production EVM network (same coordinates as
+     * `networkInfo("arbitrum-one")`).
+     *
+     * `data_dir`: see [`Self::connect`].
+     */
+public static func connectDefaultWithWallet(privateKey: String, dataDir: String? = nil)async throws  -> Client  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_ant_ffi_fn_constructor_client_connect_default_with_wallet(FfiConverterString.lower(privateKey),FfiConverterOptionString.lower(dataDir)
                 )
             },
             pollFunc: ffi_ant_ffi_rust_future_poll_pointer,
@@ -822,12 +937,14 @@ public static func connect(peers: [String])async throws  -> Client  {
      * queries work (they need the network), but payment is signed off-device
      * by an external wallet (e.g. WalletConnect). Use [`Self::prepare_data_upload`]
      * / [`Self::prepare_file_upload`] then [`Self::finalize_upload`].
+     *
+     * `data_dir`: see [`Self::connect`].
      */
-public static func connectForExternalSigner(peers: [String], rpcUrl: String, paymentTokenAddress: String, paymentVaultAddress: String)async throws  -> Client  {
+public static func connectForExternalSigner(peers: [String], rpcUrl: String, paymentTokenAddress: String, paymentVaultAddress: String, dataDir: String? = nil)async throws  -> Client  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
-                uniffi_ant_ffi_fn_constructor_client_connect_for_external_signer(FfiConverterSequenceString.lower(peers),FfiConverterString.lower(rpcUrl),FfiConverterString.lower(paymentTokenAddress),FfiConverterString.lower(paymentVaultAddress)
+                uniffi_ant_ffi_fn_constructor_client_connect_for_external_signer(FfiConverterSequenceString.lower(peers),FfiConverterString.lower(rpcUrl),FfiConverterString.lower(paymentTokenAddress),FfiConverterString.lower(paymentVaultAddress),FfiConverterOptionString.lower(dataDir)
                 )
             },
             pollFunc: ffi_ant_ffi_rust_future_poll_pointer,
@@ -850,12 +967,14 @@ public static func connectForExternalSigner(peers: [String], rpcUrl: String, pay
      *
      * Fails if the manifest doesn't exist, is malformed, or has no `evm`
      * section (a devnet started without payment enforcement).
+     *
+     * `data_dir`: see [`Self::connect`].
      */
-public static func connectFromDevnetManifest(path: String)async throws  -> Client  {
+public static func connectFromDevnetManifest(path: String, dataDir: String? = nil)async throws  -> Client  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
-                uniffi_ant_ffi_fn_constructor_client_connect_from_devnet_manifest(FfiConverterString.lower(path)
+                uniffi_ant_ffi_fn_constructor_client_connect_from_devnet_manifest(FfiConverterString.lower(path),FfiConverterOptionString.lower(dataDir)
                 )
             },
             pollFunc: ffi_ant_ffi_rust_future_poll_pointer,
@@ -872,12 +991,14 @@ public static func connectFromDevnetManifest(path: String)async throws  -> Clien
      * attaches **no wallet** (the manifest's `wallet_private_key` may be empty
      * — e.g. the Sepolia devnet, which expects you to bring your own wallet).
      * Pay via `prepare_*` + an external signer + `finalize_upload`.
+     *
+     * `data_dir`: see [`Self::connect`].
      */
-public static func connectFromDevnetManifestExternalSigner(path: String)async throws  -> Client  {
+public static func connectFromDevnetManifestExternalSigner(path: String, dataDir: String? = nil)async throws  -> Client  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
-                uniffi_ant_ffi_fn_constructor_client_connect_from_devnet_manifest_external_signer(FfiConverterString.lower(path)
+                uniffi_ant_ffi_fn_constructor_client_connect_from_devnet_manifest_external_signer(FfiConverterString.lower(path),FfiConverterOptionString.lower(dataDir)
                 )
             },
             pollFunc: ffi_ant_ffi_rust_future_poll_pointer,
@@ -890,12 +1011,14 @@ public static func connectFromDevnetManifestExternalSigner(path: String)async th
     
     /**
      * Connect to a local test network.
+     *
+     * `data_dir`: see [`Self::connect`].
      */
-public static func connectLocal()async throws  -> Client  {
+public static func connectLocal(dataDir: String? = nil)async throws  -> Client  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
-                uniffi_ant_ffi_fn_constructor_client_connect_local(
+                uniffi_ant_ffi_fn_constructor_client_connect_local(FfiConverterOptionString.lower(dataDir)
                 )
             },
             pollFunc: ffi_ant_ffi_rust_future_poll_pointer,
@@ -911,12 +1034,14 @@ public static func connectLocal()async throws  -> Client  {
      *
      * Takes the wallet private key and EVM network details directly,
      * since the wallet must be constructed fresh for ownership transfer.
+     *
+     * `data_dir`: see [`Self::connect`].
      */
-public static func connectWithWallet(peers: [String], privateKey: String, rpcUrl: String, paymentTokenAddress: String, paymentVaultAddress: String)async throws  -> Client  {
+public static func connectWithWallet(peers: [String], privateKey: String, rpcUrl: String, paymentTokenAddress: String, paymentVaultAddress: String, dataDir: String? = nil)async throws  -> Client  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
-                uniffi_ant_ffi_fn_constructor_client_connect_with_wallet(FfiConverterSequenceString.lower(peers),FfiConverterString.lower(privateKey),FfiConverterString.lower(rpcUrl),FfiConverterString.lower(paymentTokenAddress),FfiConverterString.lower(paymentVaultAddress)
+                uniffi_ant_ffi_fn_constructor_client_connect_with_wallet(FfiConverterSequenceString.lower(peers),FfiConverterString.lower(privateKey),FfiConverterString.lower(rpcUrl),FfiConverterString.lower(paymentTokenAddress),FfiConverterString.lower(paymentVaultAddress),FfiConverterOptionString.lower(dataDir)
                 )
             },
             pollFunc: ffi_ant_ffi_rust_future_poll_pointer,
@@ -1098,13 +1223,13 @@ open func dataMapStore(dataMapHex: String)async throws  -> String  {
     /**
      * Upload private data. Returns the serialized data map (hex).
      */
-open func dataPutPrivate(data: Data, paymentMode: String)async throws  -> DataPutPrivateResult  {
+open func dataPutPrivate(data: Data, paymentMode: PaymentMode)async throws  -> DataPutPrivateResult  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_ant_ffi_fn_method_client_data_put_private(
                     self.uniffiClonePointer(),
-                    FfiConverterData.lower(data),FfiConverterString.lower(paymentMode)
+                    FfiConverterData.lower(data),FfiConverterTypePaymentMode_lower(paymentMode)
                 )
             },
             pollFunc: ffi_ant_ffi_rust_future_poll_rust_buffer,
@@ -1118,13 +1243,13 @@ open func dataPutPrivate(data: Data, paymentMode: String)async throws  -> DataPu
     /**
      * Upload public data. Returns the address of the stored data map.
      */
-open func dataPutPublic(data: Data, paymentMode: String)async throws  -> DataPutPublicResult  {
+open func dataPutPublic(data: Data, paymentMode: PaymentMode)async throws  -> DataPutPublicResult  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_ant_ffi_fn_method_client_data_put_public(
                     self.uniffiClonePointer(),
-                    FfiConverterData.lower(data),FfiConverterString.lower(paymentMode)
+                    FfiConverterData.lower(data),FfiConverterTypePaymentMode_lower(paymentMode)
                 )
             },
             pollFunc: ffi_ant_ffi_rust_future_poll_rust_buffer,
@@ -1158,7 +1283,7 @@ open func downloadPrivateToFile(dataMapHex: String, destPath: String, listener: 
     
     /**
      * Download public data by address straight to a file on disk, reporting
-     * live progress (`"resolving"` then `"downloading"` phases). Returns bytes
+     * live progress (`Resolving` then `Downloading` phases). Returns bytes
      * written.
      */
 open func downloadPublicToFile(addressHex: String, destPath: String, listener: ProgressListener)async throws  -> UInt64  {
@@ -1184,27 +1309,75 @@ open func downloadPublicToFile(addressHex: String, destPath: String, listener: P
      * is fast (~seconds) and needs **no wallet** — safe to call in the
      * external-signer flow to preview cost before `prepareFileUpload`.
      *
-     * `payment_mode` is one of "auto", "merkle", or "single". Check
-     * `CostEstimate.confidence` before treating a `"0"` storage cost as free.
+     * Check `CostEstimate.confidence` before treating a `"0"` storage cost
+     * as free.
      *
      * This prices the file's data chunks only. A *public* upload additionally
      * stores the serialized data map as one extra chunk, which is not included
      * here — so treat the result as the data-storage estimate, not the exact
      * guaranteed total of a public publish.
      */
-open func estimateFileCost(path: String, paymentMode: String)async throws  -> CostEstimate  {
+open func estimateFileCost(path: String, paymentMode: PaymentMode)async throws  -> CostEstimate  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_ant_ffi_fn_method_client_estimate_file_cost(
                     self.uniffiClonePointer(),
-                    FfiConverterString.lower(path),FfiConverterString.lower(paymentMode)
+                    FfiConverterString.lower(path),FfiConverterTypePaymentMode_lower(paymentMode)
                 )
             },
             pollFunc: ffi_ant_ffi_rust_future_poll_rust_buffer,
             completeFunc: ffi_ant_ffi_rust_future_complete_rust_buffer,
             freeFunc: ffi_ant_ffi_rust_future_free_rust_buffer,
             liftFunc: FfiConverterTypeCostEstimate_lift,
+            errorHandler: FfiConverterTypeClientError_lift
+        )
+}
+    
+    /**
+     * Same as [`Self::estimate_file_cost`] but reports live progress to
+     * `listener` (the `Encrypting` phase). Estimating requires
+     * self-encrypting the whole file to derive chunk addresses, which takes
+     * real time for large files — without progress, a multi-GB estimate looks
+     * like a hang.
+     */
+open func estimateFileCostWithProgress(path: String, paymentMode: PaymentMode, listener: ProgressListener)async throws  -> CostEstimate  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_ant_ffi_fn_method_client_estimate_file_cost_with_progress(
+                    self.uniffiClonePointer(),
+                    FfiConverterString.lower(path),FfiConverterTypePaymentMode_lower(paymentMode),FfiConverterCallbackInterfaceProgressListener_lower(listener)
+                )
+            },
+            pollFunc: ffi_ant_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_ant_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_ant_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeCostEstimate_lift,
+            errorHandler: FfiConverterTypeClientError_lift
+        )
+}
+    
+    /**
+     * Download a private file to disk by hex-encoded data map, without a
+     * progress listener — the no-progress counterpart of
+     * [`Self::download_private_to_file`], mirroring how
+     * [`Self::file_download_public`] pairs with
+     * [`Self::download_public_to_file`].
+     */
+open func fileDownloadPrivate(dataMapHex: String, destPath: String)async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_ant_ffi_fn_method_client_file_download_private(
+                    self.uniffiClonePointer(),
+                    FfiConverterString.lower(dataMapHex),FfiConverterString.lower(destPath)
+                )
+            },
+            pollFunc: ffi_ant_ffi_rust_future_poll_void,
+            completeFunc: ffi_ant_ffi_rust_future_complete_void,
+            freeFunc: ffi_ant_ffi_rust_future_free_void,
+            liftFunc: { $0 },
             errorHandler: FfiConverterTypeClientError_lift
         )
 }
@@ -1235,13 +1408,13 @@ open func fileDownloadPublic(addressHex: String, destPath: String)async throws  
      * later via `dataGetPrivate`. This is the private counterpart of
      * `fileUploadPublic`, and the file-based analog of `dataPutPrivate`.
      */
-open func fileUploadPrivate(path: String, paymentMode: String)async throws  -> FilePutPrivateResult  {
+open func fileUploadPrivate(path: String, paymentMode: PaymentMode)async throws  -> FilePutPrivateResult  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_ant_ffi_fn_method_client_file_upload_private(
                     self.uniffiClonePointer(),
-                    FfiConverterString.lower(path),FfiConverterString.lower(paymentMode)
+                    FfiConverterString.lower(path),FfiConverterTypePaymentMode_lower(paymentMode)
                 )
             },
             pollFunc: ffi_ant_ffi_rust_future_poll_rust_buffer,
@@ -1253,15 +1426,65 @@ open func fileUploadPrivate(path: String, paymentMode: String)async throws  -> F
 }
     
     /**
-     * Upload a file from disk (public). Returns the address.
+     * Same as [`Self::file_upload_private`] but reports live progress to
+     * `listener` (the `Encrypting`, `Quoting` and `Storing` upload
+     * phases). See [`Self::file_upload_public_with_progress`].
      */
-open func fileUploadPublic(path: String, paymentMode: String)async throws  -> FilePutPublicResult  {
+open func fileUploadPrivateWithProgress(path: String, paymentMode: PaymentMode, listener: ProgressListener)async throws  -> FilePutPrivateResult  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_ant_ffi_fn_method_client_file_upload_private_with_progress(
+                    self.uniffiClonePointer(),
+                    FfiConverterString.lower(path),FfiConverterTypePaymentMode_lower(paymentMode),FfiConverterCallbackInterfaceProgressListener_lower(listener)
+                )
+            },
+            pollFunc: ffi_ant_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_ant_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_ant_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeFilePutPrivateResult_lift,
+            errorHandler: FfiConverterTypeClientError_lift
+        )
+}
+    
+    /**
+     * Upload a file from disk (public). The serialized data map is stored as
+     * part of the same upload payment batch — one payment covers the file's
+     * chunks and the data-map chunk. Returns the shareable address plus
+     * chunk/cost details.
+     */
+open func fileUploadPublic(path: String, paymentMode: PaymentMode)async throws  -> FilePutPublicResult  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_ant_ffi_fn_method_client_file_upload_public(
                     self.uniffiClonePointer(),
-                    FfiConverterString.lower(path),FfiConverterString.lower(paymentMode)
+                    FfiConverterString.lower(path),FfiConverterTypePaymentMode_lower(paymentMode)
+                )
+            },
+            pollFunc: ffi_ant_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_ant_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_ant_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeFilePutPublicResult_lift,
+            errorHandler: FfiConverterTypeClientError_lift
+        )
+}
+    
+    /**
+     * Same as [`Self::file_upload_public`] but reports live progress to
+     * `listener`: the `Encrypting`, `Quoting` and `Storing` upload phases
+     * as the file is self-encrypted, quoted and its chunks land on the network.
+     * Use this on the wallet-backed (built-in payment) path to drive a progress
+     * bar; the external-signer path uses the `prepare`/`finalize_*_with_progress`
+     * pair instead.
+     */
+open func fileUploadPublicWithProgress(path: String, paymentMode: PaymentMode, listener: ProgressListener)async throws  -> FilePutPublicResult  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_ant_ffi_fn_method_client_file_upload_public_with_progress(
+                    self.uniffiClonePointer(),
+                    FfiConverterString.lower(path),FfiConverterTypePaymentMode_lower(paymentMode),FfiConverterCallbackInterfaceProgressListener_lower(listener)
                 )
             },
             pollFunc: ffi_ant_ffi_rust_future_poll_rust_buffer,
@@ -1315,7 +1538,8 @@ open func finalizeUpload(uploadId: String, txHashes: [String: String])async thro
      * `payForMerkleTree`, finalize by supplying the `winner_pool_hash`
      * (0x-prefixed hex, 32 bytes) read from the `MerklePaymentMade` event in
      * the payment receipt. Use this for uploads whose
-     * `PreparedUploadInfo.payment_type == "merkle"`; wave-batch uploads must
+     * `PreparedUploadInfo.payment_type` is [`crate::PaymentType::Merkle`];
+     * wave-batch uploads must
      * use [`Self::finalize_upload`] (this rejects them with a clear error, and
      * vice versa, without consuming the prepared upload).
      *
@@ -1342,7 +1566,7 @@ open func finalizeUploadMerkle(uploadId: String, winnerPoolHash: String)async th
     
     /**
      * Same as [`Self::finalize_upload_merkle`] but reports live storing
-     * progress via `listener` (the `"storing"` phase).
+     * progress via `listener` (the `Storing` phase).
      */
 open func finalizeUploadMerkleWithProgress(uploadId: String, winnerPoolHash: String, listener: ProgressListener)async throws  -> ExternalUploadResult  {
     return
@@ -1363,7 +1587,7 @@ open func finalizeUploadMerkleWithProgress(uploadId: String, winnerPoolHash: Str
     
     /**
      * Same as [`Self::finalize_upload`] but reports live storing progress:
-     * `listener` gets `"storing"` updates (`done`/`total` chunks) as chunks
+     * `listener` gets `Storing` updates (`done`/`total` chunks) as chunks
      * land on the network.
      */
 open func finalizeUploadWithProgress(uploadId: String, txHashes: [String: String], listener: ProgressListener)async throws  -> ExternalUploadResult  {
@@ -1420,17 +1644,17 @@ open func paymentTransactions(uploadId: String)async throws  -> [TxRequest]  {
     
     /**
      * Phase 1 (external signer): encrypt `data`, collect quotes, and return
-     * the payment summary. `visibility` is `"public"` or `"private"`. The
+     * the payment summary. The
      * prepared state is retained under the returned `upload_id` until
      * [`Self::finalize_upload`].
      */
-open func prepareDataUpload(data: Data, visibility: String)async throws  -> PreparedUploadInfo  {
+open func prepareDataUpload(data: Data, visibility: Visibility)async throws  -> PreparedUploadInfo  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_ant_ffi_fn_method_client_prepare_data_upload(
                     self.uniffiClonePointer(),
-                    FfiConverterData.lower(data),FfiConverterString.lower(visibility)
+                    FfiConverterData.lower(data),FfiConverterTypeVisibility_lower(visibility)
                 )
             },
             pollFunc: ffi_ant_ffi_rust_future_poll_rust_buffer,
@@ -1445,13 +1669,13 @@ open func prepareDataUpload(data: Data, visibility: String)async throws  -> Prep
      * Phase 1 (external signer): same as [`Self::prepare_data_upload`] but for
      * a file on disk.
      */
-open func prepareFileUpload(path: String, visibility: String)async throws  -> PreparedUploadInfo  {
+open func prepareFileUpload(path: String, visibility: Visibility)async throws  -> PreparedUploadInfo  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_ant_ffi_fn_method_client_prepare_file_upload(
                     self.uniffiClonePointer(),
-                    FfiConverterString.lower(path),FfiConverterString.lower(visibility)
+                    FfiConverterString.lower(path),FfiConverterTypeVisibility_lower(visibility)
                 )
             },
             pollFunc: ffi_ant_ffi_rust_future_poll_rust_buffer,
@@ -1465,17 +1689,17 @@ open func prepareFileUpload(path: String, visibility: String)async throws  -> Pr
     /**
      * Phase 1 (external signer): same as `prepareFileUpload` but reports
      * encryption/quoting progress to `listener`. Encrypting a large file to
-     * spill can take seconds, so this surfaces the `"encrypting"` and
-     * `"quoting"` phases the plain `prepareFileUpload` runs silently. (Only
+     * spill can take seconds, so this surfaces the `Encrypting` and
+     * `Quoting` phases the plain `prepareFileUpload` runs silently. (Only
      * files support prepare progress; ant-core has no in-memory data variant.)
      */
-open func prepareFileUploadWithProgress(path: String, visibility: String, listener: ProgressListener)async throws  -> PreparedUploadInfo  {
+open func prepareFileUploadWithProgress(path: String, visibility: Visibility, listener: ProgressListener)async throws  -> PreparedUploadInfo  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_ant_ffi_fn_method_client_prepare_file_upload_with_progress(
                     self.uniffiClonePointer(),
-                    FfiConverterString.lower(path),FfiConverterString.lower(visibility),FfiConverterCallbackInterfaceProgressListener_lower(listener)
+                    FfiConverterString.lower(path),FfiConverterTypeVisibility_lower(visibility),FfiConverterCallbackInterfaceProgressListener_lower(listener)
                 )
             },
             pollFunc: ffi_ant_ffi_rust_future_poll_rust_buffer,
@@ -1944,20 +2168,14 @@ public struct CostEstimate {
      */
     public var estimatedGasCostWei: String
     /**
-     * Payment mode that would be used: "auto", "merkle", or "single".
+     * Payment mode that would be used.
      */
-    public var paymentMode: String
+    public var paymentMode: PaymentMode
     /**
-     * How much to trust `storage_cost_atto`:
-     * - `"priced_sample"` — extrapolated from at least one live quote (normal case).
-     * - `"verified_all_already_stored"` — every chunk was sampled and already
-     * stored; cost is exactly `"0"` (genuinely free).
-     * - `"all_samples_already_stored_incomplete"` — every *sampled* chunk was
-     * already stored but the tail was unsampled; `"0"` is a best-effort guess
-     * the real upload reconciles at payment time. Render as "likely already
-     * stored", not guaranteed-free.
+     * How much to trust `storage_cost_atto` — see [`CostConfidence`]'s
+     * per-variant docs before treating a `"0"` cost as free.
      */
-    public var confidence: String
+    public var confidence: CostConfidence
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -1977,18 +2195,12 @@ public struct CostEstimate {
          * chunk count and payment mode, NOT a live gas-price query.
          */estimatedGasCostWei: String, 
         /**
-         * Payment mode that would be used: "auto", "merkle", or "single".
-         */paymentMode: String, 
+         * Payment mode that would be used.
+         */paymentMode: PaymentMode, 
         /**
-         * How much to trust `storage_cost_atto`:
-         * - `"priced_sample"` — extrapolated from at least one live quote (normal case).
-         * - `"verified_all_already_stored"` — every chunk was sampled and already
-         * stored; cost is exactly `"0"` (genuinely free).
-         * - `"all_samples_already_stored_incomplete"` — every *sampled* chunk was
-         * already stored but the tail was unsampled; `"0"` is a best-effort guess
-         * the real upload reconciles at payment time. Render as "likely already
-         * stored", not guaranteed-free.
-         */confidence: String) {
+         * How much to trust `storage_cost_atto` — see [`CostConfidence`]'s
+         * per-variant docs before treating a `"0"` cost as free.
+         */confidence: CostConfidence) {
         self.fileSize = fileSize
         self.chunkCount = chunkCount
         self.storageCostAtto = storageCostAtto
@@ -2049,8 +2261,8 @@ public struct FfiConverterTypeCostEstimate: FfiConverterRustBuffer {
                 chunkCount: FfiConverterUInt64.read(from: &buf), 
                 storageCostAtto: FfiConverterString.read(from: &buf), 
                 estimatedGasCostWei: FfiConverterString.read(from: &buf), 
-                paymentMode: FfiConverterString.read(from: &buf), 
-                confidence: FfiConverterString.read(from: &buf)
+                paymentMode: FfiConverterTypePaymentMode.read(from: &buf), 
+                confidence: FfiConverterTypeCostConfidence.read(from: &buf)
         )
     }
 
@@ -2059,8 +2271,8 @@ public struct FfiConverterTypeCostEstimate: FfiConverterRustBuffer {
         FfiConverterUInt64.write(value.chunkCount, into: &buf)
         FfiConverterString.write(value.storageCostAtto, into: &buf)
         FfiConverterString.write(value.estimatedGasCostWei, into: &buf)
-        FfiConverterString.write(value.paymentMode, into: &buf)
-        FfiConverterString.write(value.confidence, into: &buf)
+        FfiConverterTypePaymentMode.write(value.paymentMode, into: &buf)
+        FfiConverterTypeCostConfidence.write(value.confidence, into: &buf)
     }
 }
 
@@ -2095,7 +2307,7 @@ public struct DataPutPrivateResult {
     /**
      * Payment mode that was used.
      */
-    public var paymentModeUsed: String
+    public var paymentModeUsed: PaymentMode
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -2108,7 +2320,7 @@ public struct DataPutPrivateResult {
          */chunksStored: UInt64, 
         /**
          * Payment mode that was used.
-         */paymentModeUsed: String) {
+         */paymentModeUsed: PaymentMode) {
         self.dataMap = dataMap
         self.chunksStored = chunksStored
         self.paymentModeUsed = paymentModeUsed
@@ -2152,14 +2364,14 @@ public struct FfiConverterTypeDataPutPrivateResult: FfiConverterRustBuffer {
             try DataPutPrivateResult(
                 dataMap: FfiConverterString.read(from: &buf), 
                 chunksStored: FfiConverterUInt64.read(from: &buf), 
-                paymentModeUsed: FfiConverterString.read(from: &buf)
+                paymentModeUsed: FfiConverterTypePaymentMode.read(from: &buf)
         )
     }
 
     public static func write(_ value: DataPutPrivateResult, into buf: inout [UInt8]) {
         FfiConverterString.write(value.dataMap, into: &buf)
         FfiConverterUInt64.write(value.chunksStored, into: &buf)
-        FfiConverterString.write(value.paymentModeUsed, into: &buf)
+        FfiConverterTypePaymentMode.write(value.paymentModeUsed, into: &buf)
     }
 }
 
@@ -2192,9 +2404,9 @@ public struct DataPutPublicResult {
      */
     public var chunksStored: UInt64
     /**
-     * Payment mode that was used: "auto", "merkle", or "single".
+     * Payment mode that was used.
      */
-    public var paymentModeUsed: String
+    public var paymentModeUsed: PaymentMode
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -2206,8 +2418,8 @@ public struct DataPutPublicResult {
          * Number of chunks stored.
          */chunksStored: UInt64, 
         /**
-         * Payment mode that was used: "auto", "merkle", or "single".
-         */paymentModeUsed: String) {
+         * Payment mode that was used.
+         */paymentModeUsed: PaymentMode) {
         self.address = address
         self.chunksStored = chunksStored
         self.paymentModeUsed = paymentModeUsed
@@ -2251,14 +2463,14 @@ public struct FfiConverterTypeDataPutPublicResult: FfiConverterRustBuffer {
             try DataPutPublicResult(
                 address: FfiConverterString.read(from: &buf), 
                 chunksStored: FfiConverterUInt64.read(from: &buf), 
-                paymentModeUsed: FfiConverterString.read(from: &buf)
+                paymentModeUsed: FfiConverterTypePaymentMode.read(from: &buf)
         )
     }
 
     public static func write(_ value: DataPutPublicResult, into buf: inout [UInt8]) {
         FfiConverterString.write(value.address, into: &buf)
         FfiConverterUInt64.write(value.chunksStored, into: &buf)
-        FfiConverterString.write(value.paymentModeUsed, into: &buf)
+        FfiConverterTypePaymentMode.write(value.paymentModeUsed, into: &buf)
     }
 }
 
@@ -2415,14 +2627,46 @@ public struct FilePutPrivateResult {
      * Hex-encoded serialized data map (caller keeps this secret).
      */
     public var dataMap: String
+    /**
+     * Number of chunks stored on the network.
+     */
+    public var chunksStored: UInt64
+    /**
+     * Total storage cost paid, in atto-tokens (base-10). "0" if all pre-existed.
+     */
+    public var storageCostAtto: String
+    /**
+     * Total gas cost in wei (base-10).
+     */
+    public var gasCostWei: String
+    /**
+     * Payment mode that was used.
+     */
+    public var paymentModeUsed: PaymentMode
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
     public init(
         /**
          * Hex-encoded serialized data map (caller keeps this secret).
-         */dataMap: String) {
+         */dataMap: String, 
+        /**
+         * Number of chunks stored on the network.
+         */chunksStored: UInt64, 
+        /**
+         * Total storage cost paid, in atto-tokens (base-10). "0" if all pre-existed.
+         */storageCostAtto: String, 
+        /**
+         * Total gas cost in wei (base-10).
+         */gasCostWei: String, 
+        /**
+         * Payment mode that was used.
+         */paymentModeUsed: PaymentMode) {
         self.dataMap = dataMap
+        self.chunksStored = chunksStored
+        self.storageCostAtto = storageCostAtto
+        self.gasCostWei = gasCostWei
+        self.paymentModeUsed = paymentModeUsed
     }
 }
 
@@ -2436,11 +2680,27 @@ extension FilePutPrivateResult: Equatable, Hashable {
         if lhs.dataMap != rhs.dataMap {
             return false
         }
+        if lhs.chunksStored != rhs.chunksStored {
+            return false
+        }
+        if lhs.storageCostAtto != rhs.storageCostAtto {
+            return false
+        }
+        if lhs.gasCostWei != rhs.gasCostWei {
+            return false
+        }
+        if lhs.paymentModeUsed != rhs.paymentModeUsed {
+            return false
+        }
         return true
     }
 
     public func hash(into hasher: inout Hasher) {
         hasher.combine(dataMap)
+        hasher.combine(chunksStored)
+        hasher.combine(storageCostAtto)
+        hasher.combine(gasCostWei)
+        hasher.combine(paymentModeUsed)
     }
 }
 
@@ -2453,12 +2713,20 @@ public struct FfiConverterTypeFilePutPrivateResult: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FilePutPrivateResult {
         return
             try FilePutPrivateResult(
-                dataMap: FfiConverterString.read(from: &buf)
+                dataMap: FfiConverterString.read(from: &buf), 
+                chunksStored: FfiConverterUInt64.read(from: &buf), 
+                storageCostAtto: FfiConverterString.read(from: &buf), 
+                gasCostWei: FfiConverterString.read(from: &buf), 
+                paymentModeUsed: FfiConverterTypePaymentMode.read(from: &buf)
         )
     }
 
     public static func write(_ value: FilePutPrivateResult, into buf: inout [UInt8]) {
         FfiConverterString.write(value.dataMap, into: &buf)
+        FfiConverterUInt64.write(value.chunksStored, into: &buf)
+        FfiConverterString.write(value.storageCostAtto, into: &buf)
+        FfiConverterString.write(value.gasCostWei, into: &buf)
+        FfiConverterTypePaymentMode.write(value.paymentModeUsed, into: &buf)
     }
 }
 
@@ -2486,14 +2754,46 @@ public struct FilePutPublicResult {
      * Hex-encoded address of the stored data map.
      */
     public var address: String
+    /**
+     * Number of chunks stored on the network.
+     */
+    public var chunksStored: UInt64
+    /**
+     * Total storage cost paid, in atto-tokens (base-10). "0" if all pre-existed.
+     */
+    public var storageCostAtto: String
+    /**
+     * Total gas cost in wei (base-10).
+     */
+    public var gasCostWei: String
+    /**
+     * Payment mode that was used.
+     */
+    public var paymentModeUsed: PaymentMode
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
     public init(
         /**
          * Hex-encoded address of the stored data map.
-         */address: String) {
+         */address: String, 
+        /**
+         * Number of chunks stored on the network.
+         */chunksStored: UInt64, 
+        /**
+         * Total storage cost paid, in atto-tokens (base-10). "0" if all pre-existed.
+         */storageCostAtto: String, 
+        /**
+         * Total gas cost in wei (base-10).
+         */gasCostWei: String, 
+        /**
+         * Payment mode that was used.
+         */paymentModeUsed: PaymentMode) {
         self.address = address
+        self.chunksStored = chunksStored
+        self.storageCostAtto = storageCostAtto
+        self.gasCostWei = gasCostWei
+        self.paymentModeUsed = paymentModeUsed
     }
 }
 
@@ -2507,11 +2807,27 @@ extension FilePutPublicResult: Equatable, Hashable {
         if lhs.address != rhs.address {
             return false
         }
+        if lhs.chunksStored != rhs.chunksStored {
+            return false
+        }
+        if lhs.storageCostAtto != rhs.storageCostAtto {
+            return false
+        }
+        if lhs.gasCostWei != rhs.gasCostWei {
+            return false
+        }
+        if lhs.paymentModeUsed != rhs.paymentModeUsed {
+            return false
+        }
         return true
     }
 
     public func hash(into hasher: inout Hasher) {
         hasher.combine(address)
+        hasher.combine(chunksStored)
+        hasher.combine(storageCostAtto)
+        hasher.combine(gasCostWei)
+        hasher.combine(paymentModeUsed)
     }
 }
 
@@ -2524,12 +2840,20 @@ public struct FfiConverterTypeFilePutPublicResult: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FilePutPublicResult {
         return
             try FilePutPublicResult(
-                address: FfiConverterString.read(from: &buf)
+                address: FfiConverterString.read(from: &buf), 
+                chunksStored: FfiConverterUInt64.read(from: &buf), 
+                storageCostAtto: FfiConverterString.read(from: &buf), 
+                gasCostWei: FfiConverterString.read(from: &buf), 
+                paymentModeUsed: FfiConverterTypePaymentMode.read(from: &buf)
         )
     }
 
     public static func write(_ value: FilePutPublicResult, into buf: inout [UInt8]) {
         FfiConverterString.write(value.address, into: &buf)
+        FfiConverterUInt64.write(value.chunksStored, into: &buf)
+        FfiConverterString.write(value.storageCostAtto, into: &buf)
+        FfiConverterString.write(value.gasCostWei, into: &buf)
+        FfiConverterTypePaymentMode.write(value.paymentModeUsed, into: &buf)
     }
 }
 
@@ -2857,15 +3181,16 @@ public func FfiConverterTypePoolCommitmentEntry_lower(_ value: PoolCommitmentEnt
  *
  * `payment_type` selects which fields are meaningful and which finalize call
  * to use:
- * - `"wave_batch"` — use `payments` to build ERC-20 `approve` + `payForQuotes`,
- * then call `finalize_upload(upload_id, {quote_hash: tx_hash})`. The merkle
- * fields (`depth`/`pool_commitments`/`merkle_payment_timestamp`) are empty/0.
- * - `"merkle"` — use `depth` + `pool_commitments` + `merkle_payment_timestamp`
- * to build the `payForMerkleTree` call, then call
- * `finalize_upload_merkle(upload_id, winner_pool_hash)` with the hash from
- * the `MerklePaymentMade` event. `payments` is empty and `total_amount` is
- * `"0"` (the settled cost isn't known until the winner pool is chosen
- * on-chain).
+ * - [`PaymentType::WaveBatch`] — use `payments` to build ERC-20 `approve` +
+ * `payForQuotes`, then call `finalize_upload(upload_id, {quote_hash:
+ * tx_hash})`. The merkle fields
+ * (`depth`/`pool_commitments`/`merkle_payment_timestamp`) are empty/0.
+ * - [`PaymentType::Merkle`] — use `depth` + `pool_commitments` +
+ * `merkle_payment_timestamp` to build the `payForMerkleTree` call, then
+ * call `finalize_upload_merkle(upload_id, winner_pool_hash)` with the
+ * hash from the `MerklePaymentMade` event. `payments` is empty and
+ * `total_amount` is `"0"` (the settled cost isn't known until the winner
+ * pool is chosen on-chain).
  */
 public struct PreparedUploadInfo {
     /**
@@ -2873,9 +3198,9 @@ public struct PreparedUploadInfo {
      */
     public var uploadId: String
     /**
-     * Payment shape: `"wave_batch"` or `"merkle"`.
+     * Payment shape — selects the finalize call (see the struct docs).
      */
-    public var paymentType: String
+    public var paymentType: PaymentType
     /**
      * Wave-batch only: per-quote payments to settle on-chain. Empty for merkle
      * or if everything was already stored.
@@ -2915,8 +3240,8 @@ public struct PreparedUploadInfo {
          * Opaque handle for this prepared upload; pass to the matching finalize call.
          */uploadId: String, 
         /**
-         * Payment shape: `"wave_batch"` or `"merkle"`.
-         */paymentType: String, 
+         * Payment shape — selects the finalize call (see the struct docs).
+         */paymentType: PaymentType, 
         /**
          * Wave-batch only: per-quote payments to settle on-chain. Empty for merkle
          * or if everything was already stored.
@@ -3013,7 +3338,7 @@ public struct FfiConverterTypePreparedUploadInfo: FfiConverterRustBuffer {
         return
             try PreparedUploadInfo(
                 uploadId: FfiConverterString.read(from: &buf), 
-                paymentType: FfiConverterString.read(from: &buf), 
+                paymentType: FfiConverterTypePaymentType.read(from: &buf), 
                 payments: FfiConverterSequenceTypePaymentEntry.read(from: &buf), 
                 totalAmount: FfiConverterString.read(from: &buf), 
                 depth: FfiConverterUInt32.read(from: &buf), 
@@ -3026,7 +3351,7 @@ public struct FfiConverterTypePreparedUploadInfo: FfiConverterRustBuffer {
 
     public static func write(_ value: PreparedUploadInfo, into buf: inout [UInt8]) {
         FfiConverterString.write(value.uploadId, into: &buf)
-        FfiConverterString.write(value.paymentType, into: &buf)
+        FfiConverterTypePaymentType.write(value.paymentType, into: &buf)
         FfiConverterSequenceTypePaymentEntry.write(value.payments, into: &buf)
         FfiConverterString.write(value.totalAmount, into: &buf)
         FfiConverterUInt32.write(value.depth, into: &buf)
@@ -3057,29 +3382,34 @@ public func FfiConverterTypePreparedUploadInfo_lower(_ value: PreparedUploadInfo
  * A progress update for a long-running upload or download, delivered to a
  * [`ProgressListener`].
  *
- * `phase` is one of the following strings. Note which methods actually emit
- * each phase today:
+ * Note which methods actually emit each [`ProgressPhase`] today:
  *
- * - **upload** — `"encrypting"` then `"quoting"`, emitted by
- * `prepare_file_upload_with_progress` while the file is encrypted and
- * quoted, then `"storing"`, emitted by `finalize_upload_with_progress` as
- * chunks land on the network. (The plain `prepare_file_upload` /
- * `prepare_data_upload` and the in-memory `prepare_data_upload` path take
- * no listener, so they surface no encrypt/quote progress.)
- * - **download** — `"resolving"` then `"downloading"`, emitted by the
+ * - **upload** — `Encrypting`, then `Quoting`, then `Storing` as the file
+ * is self-encrypted, quoted, and its chunks land on the network. On the
+ * wallet-backed path all three phases come from a single
+ * `file_upload_public_with_progress` / `file_upload_private_with_progress`
+ * call. On the external-signer path they are split across the two steps:
+ * `prepare_file_upload_with_progress` emits `Encrypting`/`Quoting` and
+ * `finalize_upload_with_progress` emits `Storing`. (The plain
+ * `file_upload_*` / `prepare_*` methods take no listener, so they surface
+ * no progress.)
+ * - **download** — `Resolving` then `Downloading`, emitted by the
  * `download_*_to_file` methods.
+ * - **estimate** — `estimate_file_cost_with_progress` emits `Encrypting`
+ * only (estimating self-encrypts the whole file; nothing is quoted or
+ * stored).
  *
  * `total` is 0 when the total isn't known yet (show an indeterminate bar);
  * otherwise `done / total` is a 0..1 fraction of the current phase.
  */
 public struct ProgressUpdate {
-    public var phase: String
+    public var phase: ProgressPhase
     public var done: UInt64
     public var total: UInt64
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(phase: String, done: UInt64, total: UInt64) {
+    public init(phase: ProgressPhase, done: UInt64, total: UInt64) {
         self.phase = phase
         self.done = done
         self.total = total
@@ -3121,14 +3451,14 @@ public struct FfiConverterTypeProgressUpdate: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ProgressUpdate {
         return
             try ProgressUpdate(
-                phase: FfiConverterString.read(from: &buf), 
+                phase: FfiConverterTypeProgressPhase.read(from: &buf), 
                 done: FfiConverterUInt64.read(from: &buf), 
                 total: FfiConverterUInt64.read(from: &buf)
         )
     }
 
     public static func write(_ value: ProgressUpdate, into buf: inout [UInt8]) {
-        FfiConverterString.write(value.phase, into: &buf)
+        FfiConverterTypeProgressPhase.write(value.phase, into: &buf)
         FfiConverterUInt64.write(value.done, into: &buf)
         FfiConverterUInt64.write(value.total, into: &buf)
     }
@@ -3271,13 +3601,14 @@ public struct TxRequest {
      */
     public var data: String
     /**
-     * `"approve"` (ERC-20 allowance) or `"pay"` (the vault payment call).
+     * What this transaction is for (allowance approval vs the payment call).
      */
-    public var kind: String
+    public var kind: TxKind
     /**
-     * Wave-batch `"pay"` only: the 0x-prefixed quote hashes this payment
-     * settles. After signing, map each of these to the resulting tx hash to
-     * build the `finalize_upload` map. Empty for `approve` and for merkle.
+     * Wave-batch [`TxKind::Pay`] only: the 0x-prefixed quote hashes this
+     * payment settles. After signing, map each of these to the resulting tx
+     * hash to build the `finalize_upload` map. Empty for approvals and for
+     * merkle.
      */
     public var quoteHashes: [String]
 
@@ -3292,12 +3623,13 @@ public struct TxRequest {
          * 0x-prefixed ABI-encoded calldata for the transaction's `data` field.
          */data: String, 
         /**
-         * `"approve"` (ERC-20 allowance) or `"pay"` (the vault payment call).
-         */kind: String, 
+         * What this transaction is for (allowance approval vs the payment call).
+         */kind: TxKind, 
         /**
-         * Wave-batch `"pay"` only: the 0x-prefixed quote hashes this payment
-         * settles. After signing, map each of these to the resulting tx hash to
-         * build the `finalize_upload` map. Empty for `approve` and for merkle.
+         * Wave-batch [`TxKind::Pay`] only: the 0x-prefixed quote hashes this
+         * payment settles. After signing, map each of these to the resulting tx
+         * hash to build the `finalize_upload` map. Empty for approvals and for
+         * merkle.
          */quoteHashes: [String]) {
         self.to = to
         self.data = data
@@ -3347,7 +3679,7 @@ public struct FfiConverterTypeTxRequest: FfiConverterRustBuffer {
             try TxRequest(
                 to: FfiConverterString.read(from: &buf), 
                 data: FfiConverterString.read(from: &buf), 
-                kind: FfiConverterString.read(from: &buf), 
+                kind: FfiConverterTypeTxKind.read(from: &buf), 
                 quoteHashes: FfiConverterSequenceString.read(from: &buf)
         )
     }
@@ -3355,7 +3687,7 @@ public struct FfiConverterTypeTxRequest: FfiConverterRustBuffer {
     public static func write(_ value: TxRequest, into buf: inout [UInt8]) {
         FfiConverterString.write(value.to, into: &buf)
         FfiConverterString.write(value.data, into: &buf)
-        FfiConverterString.write(value.kind, into: &buf)
+        FfiConverterTypeTxKind.write(value.kind, into: &buf)
         FfiConverterSequenceString.write(value.quoteHashes, into: &buf)
     }
 }
@@ -3388,6 +3720,20 @@ public enum ClientError: Swift.Error {
     case NetworkError(reason: String
     )
     case PaymentError(reason: String
+    )
+    case Timeout(reason: String
+    )
+    case InsufficientDiskSpace(reason: String
+    )
+    /**
+     * The upload stopped partway: some chunks stored and some on-chain spend
+     * already occurred. Money has been spent — show `storage_cost_atto` /
+     * `gas_cost_wei` to the user rather than a generic failure, and retry the
+     * upload (chunks already on the network are skipped, not re-paid).
+     * Per-chunk address lists are not exposed — resume-from-partial needs
+     * upstream retryable finalize (tracked as V2-571).
+     */
+    case PartialUpload(chunksStored: UInt64, chunksFailed: UInt64, totalChunks: UInt64, storageCostAtto: String, gasCostWei: String, reason: String
     )
     case InvalidInput(reason: String
     )
@@ -3422,15 +3768,29 @@ public struct FfiConverterTypeClientError: FfiConverterRustBuffer {
         case 3: return .PaymentError(
             reason: try FfiConverterString.read(from: &buf)
             )
-        case 4: return .InvalidInput(
+        case 4: return .Timeout(
             reason: try FfiConverterString.read(from: &buf)
             )
-        case 5: return .NotFound(
+        case 5: return .InsufficientDiskSpace(
             reason: try FfiConverterString.read(from: &buf)
             )
-        case 6: return .AlreadyExists
-        case 7: return .WalletNotConfigured
-        case 8: return .InternalError(
+        case 6: return .PartialUpload(
+            chunksStored: try FfiConverterUInt64.read(from: &buf), 
+            chunksFailed: try FfiConverterUInt64.read(from: &buf), 
+            totalChunks: try FfiConverterUInt64.read(from: &buf), 
+            storageCostAtto: try FfiConverterString.read(from: &buf), 
+            gasCostWei: try FfiConverterString.read(from: &buf), 
+            reason: try FfiConverterString.read(from: &buf)
+            )
+        case 7: return .InvalidInput(
+            reason: try FfiConverterString.read(from: &buf)
+            )
+        case 8: return .NotFound(
+            reason: try FfiConverterString.read(from: &buf)
+            )
+        case 9: return .AlreadyExists
+        case 10: return .WalletNotConfigured
+        case 11: return .InternalError(
             reason: try FfiConverterString.read(from: &buf)
             )
 
@@ -3460,26 +3820,46 @@ public struct FfiConverterTypeClientError: FfiConverterRustBuffer {
             FfiConverterString.write(reason, into: &buf)
             
         
-        case let .InvalidInput(reason):
+        case let .Timeout(reason):
             writeInt(&buf, Int32(4))
             FfiConverterString.write(reason, into: &buf)
             
         
-        case let .NotFound(reason):
+        case let .InsufficientDiskSpace(reason):
             writeInt(&buf, Int32(5))
             FfiConverterString.write(reason, into: &buf)
             
         
-        case .AlreadyExists:
+        case let .PartialUpload(chunksStored,chunksFailed,totalChunks,storageCostAtto,gasCostWei,reason):
             writeInt(&buf, Int32(6))
+            FfiConverterUInt64.write(chunksStored, into: &buf)
+            FfiConverterUInt64.write(chunksFailed, into: &buf)
+            FfiConverterUInt64.write(totalChunks, into: &buf)
+            FfiConverterString.write(storageCostAtto, into: &buf)
+            FfiConverterString.write(gasCostWei, into: &buf)
+            FfiConverterString.write(reason, into: &buf)
+            
+        
+        case let .InvalidInput(reason):
+            writeInt(&buf, Int32(7))
+            FfiConverterString.write(reason, into: &buf)
+            
+        
+        case let .NotFound(reason):
+            writeInt(&buf, Int32(8))
+            FfiConverterString.write(reason, into: &buf)
+            
+        
+        case .AlreadyExists:
+            writeInt(&buf, Int32(9))
         
         
         case .WalletNotConfigured:
-            writeInt(&buf, Int32(7))
+            writeInt(&buf, Int32(10))
         
         
         case let .InternalError(reason):
-            writeInt(&buf, Int32(8))
+            writeInt(&buf, Int32(11))
             FfiConverterString.write(reason, into: &buf)
             
         }
@@ -3512,6 +3892,508 @@ extension ClientError: Foundation.LocalizedError {
         String(reflecting: self)
     }
 }
+
+
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
+ * How much to trust a [`CostEstimate`]'s `storage_cost_atto`.
+ */
+
+public enum CostConfidence {
+    
+    /**
+     * Extrapolated from at least one live quote (the normal case).
+     */
+    case pricedSample
+    /**
+     * Every chunk was sampled and already stored; cost is exactly `"0"`
+     * (genuinely free).
+     */
+    case verifiedAllAlreadyStored
+    /**
+     * Every *sampled* chunk was already stored but the tail was unsampled;
+     * `"0"` is a best-effort guess the real upload reconciles at payment
+     * time. Render as "likely already stored", not guaranteed-free.
+     */
+    case allSamplesAlreadyStoredIncomplete
+}
+
+
+#if compiler(>=6)
+extension CostConfidence: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeCostConfidence: FfiConverterRustBuffer {
+    typealias SwiftType = CostConfidence
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> CostConfidence {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .pricedSample
+        
+        case 2: return .verifiedAllAlreadyStored
+        
+        case 3: return .allSamplesAlreadyStoredIncomplete
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: CostConfidence, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .pricedSample:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .verifiedAllAlreadyStored:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .allSamplesAlreadyStoredIncomplete:
+            writeInt(&buf, Int32(3))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCostConfidence_lift(_ buf: RustBuffer) throws -> CostConfidence {
+    return try FfiConverterTypeCostConfidence.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCostConfidence_lower(_ value: CostConfidence) -> RustBuffer {
+    return FfiConverterTypeCostConfidence.lower(value)
+}
+
+
+extension CostConfidence: Equatable, Hashable {}
+
+
+
+
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
+ * How an upload is paid for.
+ */
+
+public enum PaymentMode {
+    
+    /**
+     * Let the SDK pick: merkle batching for large uploads, single otherwise.
+     */
+    case auto
+    /**
+     * Merkle-batched payment — one on-chain payment covering many chunks.
+     */
+    case merkle
+    /**
+     * Per-quote wave payment.
+     */
+    case single
+}
+
+
+#if compiler(>=6)
+extension PaymentMode: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePaymentMode: FfiConverterRustBuffer {
+    typealias SwiftType = PaymentMode
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PaymentMode {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .auto
+        
+        case 2: return .merkle
+        
+        case 3: return .single
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: PaymentMode, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .auto:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .merkle:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .single:
+            writeInt(&buf, Int32(3))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePaymentMode_lift(_ buf: RustBuffer) throws -> PaymentMode {
+    return try FfiConverterTypePaymentMode.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePaymentMode_lower(_ value: PaymentMode) -> RustBuffer {
+    return FfiConverterTypePaymentMode.lower(value)
+}
+
+
+extension PaymentMode: Equatable, Hashable {}
+
+
+
+
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
+ * Payment shape of a prepared external-signer upload — selects which
+ * finalize call to use (see [`PreparedUploadInfo`]).
+ */
+
+public enum PaymentType {
+    
+    case waveBatch
+    case merkle
+}
+
+
+#if compiler(>=6)
+extension PaymentType: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePaymentType: FfiConverterRustBuffer {
+    typealias SwiftType = PaymentType
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PaymentType {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .waveBatch
+        
+        case 2: return .merkle
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: PaymentType, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .waveBatch:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .merkle:
+            writeInt(&buf, Int32(2))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePaymentType_lift(_ buf: RustBuffer) throws -> PaymentType {
+    return try FfiConverterTypePaymentType.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePaymentType_lower(_ value: PaymentType) -> RustBuffer {
+    return FfiConverterTypePaymentType.lower(value)
+}
+
+
+extension PaymentType: Equatable, Hashable {}
+
+
+
+
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
+ * Which phase a [`ProgressUpdate`] belongs to.
+ */
+
+public enum ProgressPhase {
+    
+    case encrypting
+    case quoting
+    case storing
+    case resolving
+    case downloading
+}
+
+
+#if compiler(>=6)
+extension ProgressPhase: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeProgressPhase: FfiConverterRustBuffer {
+    typealias SwiftType = ProgressPhase
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ProgressPhase {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .encrypting
+        
+        case 2: return .quoting
+        
+        case 3: return .storing
+        
+        case 4: return .resolving
+        
+        case 5: return .downloading
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: ProgressPhase, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .encrypting:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .quoting:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .storing:
+            writeInt(&buf, Int32(3))
+        
+        
+        case .resolving:
+            writeInt(&buf, Int32(4))
+        
+        
+        case .downloading:
+            writeInt(&buf, Int32(5))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeProgressPhase_lift(_ buf: RustBuffer) throws -> ProgressPhase {
+    return try FfiConverterTypeProgressPhase.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeProgressPhase_lower(_ value: ProgressPhase) -> RustBuffer {
+    return FfiConverterTypeProgressPhase.lower(value)
+}
+
+
+extension ProgressPhase: Equatable, Hashable {}
+
+
+
+
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
+ * What a [`TxRequest`] is for.
+ */
+
+public enum TxKind {
+    
+    /**
+     * ERC-20 allowance approval (sent to the token contract).
+     */
+    case approve
+    /**
+     * The vault payment call.
+     */
+    case pay
+}
+
+
+#if compiler(>=6)
+extension TxKind: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeTxKind: FfiConverterRustBuffer {
+    typealias SwiftType = TxKind
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> TxKind {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .approve
+        
+        case 2: return .pay
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: TxKind, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .approve:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .pay:
+            writeInt(&buf, Int32(2))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTxKind_lift(_ buf: RustBuffer) throws -> TxKind {
+    return try FfiConverterTypeTxKind.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTxKind_lower(_ value: TxKind) -> RustBuffer {
+    return FfiConverterTypeTxKind.lower(value)
+}
+
+
+extension TxKind: Equatable, Hashable {}
+
+
+
+
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
+ * Whether an upload is publicly retrievable by address, or private (the data
+ * map is returned to the caller only).
+ */
+
+public enum Visibility {
+    
+    case `public`
+    case `private`
+}
+
+
+#if compiler(>=6)
+extension Visibility: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeVisibility: FfiConverterRustBuffer {
+    typealias SwiftType = Visibility
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> Visibility {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .`public`
+        
+        case 2: return .`private`
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: Visibility, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .`public`:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .`private`:
+            writeInt(&buf, Int32(2))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeVisibility_lift(_ buf: RustBuffer) throws -> Visibility {
+    return try FfiConverterTypeVisibility.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeVisibility_lower(_ value: Visibility) -> RustBuffer {
+    return FfiConverterTypeVisibility.lower(value)
+}
+
+
+extension Visibility: Equatable, Hashable {}
+
+
 
 
 
@@ -3948,6 +4830,17 @@ fileprivate func uniffiFutureContinuationCallback(handle: UInt64, pollResult: In
     }
 }
 /**
+ * The AntFfi SDK version, e.g. `"0.0.8"` — matches the released SDK version
+ * (the ant-swift tag / ant-android maven version) from 0.0.8 onward. Bump
+ * the crate version in `Cargo.toml` as part of every release cut.
+ */
+public func antFfiVersion() -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+    uniffi_ant_ffi_fn_func_ant_ffi_version($0
+    )
+})
+}
+/**
  * Read the winning pool hash from a settled `payForMerkleTree` transaction, so
  * the caller can pass it to `finalize_upload_merkle`. Finds the
  * `MerklePaymentMade` log emitted by `vault_address` in the receipt and returns
@@ -4018,6 +4911,9 @@ private let initializationResult: InitializationResult = {
     if bindings_contract_version != scaffolding_contract_version {
         return InitializationResult.contractVersionMismatch
     }
+    if (uniffi_ant_ffi_checksum_func_ant_ffi_version() != 46579) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_ant_ffi_checksum_func_merkle_winner_pool_hash() != 2925) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -4051,52 +4947,64 @@ private let initializationResult: InitializationResult = {
     if (uniffi_ant_ffi_checksum_method_client_data_map_store() != 55538) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_ant_ffi_checksum_method_client_data_put_private() != 63662) {
+    if (uniffi_ant_ffi_checksum_method_client_data_put_private() != 37291) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_ant_ffi_checksum_method_client_data_put_public() != 34392) {
+    if (uniffi_ant_ffi_checksum_method_client_data_put_public() != 5118) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_ant_ffi_checksum_method_client_download_private_to_file() != 25712) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_ant_ffi_checksum_method_client_download_public_to_file() != 59266) {
+    if (uniffi_ant_ffi_checksum_method_client_download_public_to_file() != 30368) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_ant_ffi_checksum_method_client_estimate_file_cost() != 12371) {
+    if (uniffi_ant_ffi_checksum_method_client_estimate_file_cost() != 52007) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ant_ffi_checksum_method_client_estimate_file_cost_with_progress() != 24409) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ant_ffi_checksum_method_client_file_download_private() != 37067) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_ant_ffi_checksum_method_client_file_download_public() != 9845) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_ant_ffi_checksum_method_client_file_upload_private() != 16834) {
+    if (uniffi_ant_ffi_checksum_method_client_file_upload_private() != 10928) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_ant_ffi_checksum_method_client_file_upload_public() != 25369) {
+    if (uniffi_ant_ffi_checksum_method_client_file_upload_private_with_progress() != 58909) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ant_ffi_checksum_method_client_file_upload_public() != 5086) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ant_ffi_checksum_method_client_file_upload_public_with_progress() != 20920) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_ant_ffi_checksum_method_client_finalize_upload() != 10679) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_ant_ffi_checksum_method_client_finalize_upload_merkle() != 10066) {
+    if (uniffi_ant_ffi_checksum_method_client_finalize_upload_merkle() != 17796) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_ant_ffi_checksum_method_client_finalize_upload_merkle_with_progress() != 60945) {
+    if (uniffi_ant_ffi_checksum_method_client_finalize_upload_merkle_with_progress() != 12233) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_ant_ffi_checksum_method_client_finalize_upload_with_progress() != 10031) {
+    if (uniffi_ant_ffi_checksum_method_client_finalize_upload_with_progress() != 28128) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_ant_ffi_checksum_method_client_payment_transactions() != 28846) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_ant_ffi_checksum_method_client_prepare_data_upload() != 1621) {
+    if (uniffi_ant_ffi_checksum_method_client_prepare_data_upload() != 12211) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_ant_ffi_checksum_method_client_prepare_file_upload() != 27493) {
+    if (uniffi_ant_ffi_checksum_method_client_prepare_file_upload() != 5194) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_ant_ffi_checksum_method_client_prepare_file_upload_with_progress() != 33945) {
+    if (uniffi_ant_ffi_checksum_method_client_prepare_file_upload_with_progress() != 26872) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_ant_ffi_checksum_method_client_wallet_approve() != 45082) {
@@ -4111,22 +5019,31 @@ private let initializationResult: InitializationResult = {
     if (uniffi_ant_ffi_checksum_method_wallet_balance_of_tokens() != 62360) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_ant_ffi_checksum_constructor_client_connect() != 27345) {
+    if (uniffi_ant_ffi_checksum_constructor_client_connect() != 21570) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_ant_ffi_checksum_constructor_client_connect_for_external_signer() != 7905) {
+    if (uniffi_ant_ffi_checksum_constructor_client_connect_default() != 41976) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_ant_ffi_checksum_constructor_client_connect_from_devnet_manifest() != 55097) {
+    if (uniffi_ant_ffi_checksum_constructor_client_connect_default_for_external_signer() != 1966) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_ant_ffi_checksum_constructor_client_connect_from_devnet_manifest_external_signer() != 58161) {
+    if (uniffi_ant_ffi_checksum_constructor_client_connect_default_with_wallet() != 41121) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_ant_ffi_checksum_constructor_client_connect_local() != 40455) {
+    if (uniffi_ant_ffi_checksum_constructor_client_connect_for_external_signer() != 7344) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_ant_ffi_checksum_constructor_client_connect_with_wallet() != 6225) {
+    if (uniffi_ant_ffi_checksum_constructor_client_connect_from_devnet_manifest() != 56502) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ant_ffi_checksum_constructor_client_connect_from_devnet_manifest_external_signer() != 25022) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ant_ffi_checksum_constructor_client_connect_local() != 19835) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ant_ffi_checksum_constructor_client_connect_with_wallet() != 36404) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_ant_ffi_checksum_constructor_wallet_from_private_key() != 21803) {
